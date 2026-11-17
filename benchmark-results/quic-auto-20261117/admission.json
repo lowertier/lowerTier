@@ -1,0 +1,4219 @@
+[
+  {
+    "label": "setup-healthy-quic-off-r0",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 548.6468840390444
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 446.38983393087983
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 445.7738511264324
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 444.70770796760917
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 447.21810379996896
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 444.66114370152354
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 446.2735401466489
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 444.406904745847
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 444.56770503893495
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 446.4313345961273
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 444.127784576267
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 444.85253980383277
+      }
+    ],
+    "seconds": 5.451932900119573,
+    "decisions": {
+      "disabled": 12
+    },
+    "cpu_seconds": 0.039999999999999994,
+    "rss_kib_min": 9472,
+    "rss_kib_max": 12672,
+    "path_after": {
+      "connection": 4982265880592,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 188,
+      "tx_bytes": 27943,
+      "tx_ios": 188,
+      "rx_datagrams": 188,
+      "rx_bytes": 68206,
+      "rx_ios": 190,
+      "tx_frames": 88,
+      "rx_frames": 75,
+      "rtt_us": 110384,
+      "cwnd": 24071,
+      "pacing_rate_bps": 561904,
+      "in_flight": 172,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 190,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 634,
+      "datagram_queue_dequeued": 88,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "off",
+    "repeat": 0
+  },
+  {
+    "label": "setup-healthy-quic-on-r0",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 248.97162290289998
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 237.44045617058873
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 217.30219386518002
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 251.18730124086142
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 221.80975461378694
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.494928881526
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 219.1424840129912
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 417.0755879022181
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 222.38795086741447
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.49622109159827
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 214.6213329397142
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 214.47207685559988
+      }
+    ],
+    "seconds": 2.9858697932213545,
+    "decisions": {
+      "eligible": 12
+    },
+    "cpu_seconds": 0.03,
+    "rss_kib_min": 9344,
+    "rss_kib_max": 13440,
+    "path_after": {
+      "connection": 5256002936848,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 117,
+      "tx_bytes": 19163,
+      "tx_ios": 117,
+      "rx_datagrams": 138,
+      "rx_bytes": 60428,
+      "rx_ios": 140,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 113216,
+      "cwnd": 24118,
+      "pacing_rate_bps": 538520,
+      "in_flight": 41,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 119,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "on",
+    "repeat": 0
+  },
+  {
+    "label": "setup-healthy-quic-auto-r0",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 233.4501752629876
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 226.64878284558654
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 225.71703605353832
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 224.31931691244245
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 224.00071704760194
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 223.91703119501472
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 223.87171303853393
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 224.26657937467098
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 224.10786570981145
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 223.39858300983906
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 224.1742992773652
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 224.33821018785238
+      }
+    ],
+    "seconds": 2.702730522956699,
+    "decisions": {
+      "eligible": 12
+    },
+    "cpu_seconds": 0.020000000000000018,
+    "rss_kib_min": 16412,
+    "rss_kib_max": 16924,
+    "path_after": {
+      "connection": 5576279990288,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 115,
+      "tx_bytes": 23525,
+      "tx_ios": 115,
+      "rx_datagrams": 135,
+      "rx_bytes": 60148,
+      "rx_ios": 137,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 110867,
+      "cwnd": 24153,
+      "pacing_rate_bps": 453680,
+      "in_flight": 79,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 117,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "auto",
+    "repeat": 0
+  },
+  {
+    "label": "setup-healthy-quic-on-r1",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 241.58186092972755
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.46443509683013
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.56662074103951
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.55970613658428
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.70411980897188
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.49959205836058
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.60632302239537
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.682818133384
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.60853305086493
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.52228466421366
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.58761880546808
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 238.60892886295915
+      }
+    ],
+    "seconds": 2.8663757387548685,
+    "decisions": {
+      "eligible": 12
+    },
+    "cpu_seconds": 0.020000000000000004,
+    "rss_kib_min": 27136,
+    "rss_kib_max": 27520,
+    "path_after": {
+      "connection": 4681081298960,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 125,
+      "tx_bytes": 19144,
+      "tx_ios": 125,
+      "rx_datagrams": 133,
+      "rx_bytes": 60031,
+      "rx_ios": 135,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 118809,
+      "cwnd": 24042,
+      "pacing_rate_bps": 485048,
+      "in_flight": 79,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 127,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "on",
+    "repeat": 1
+  },
+  {
+    "label": "setup-healthy-quic-auto-r1",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 231.57207667827606
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 227.00987523421645
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 227.1942589432001
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 227.00328985229135
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 226.90095705911517
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 227.11498197168112
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 226.89277678728104
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 227.18018805608153
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 226.9858201034367
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 226.93019406870008
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 227.19000186771154
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 226.92338796332479
+      }
+    ],
+    "seconds": 2.72927912697196,
+    "decisions": {
+      "eligible": 12
+    },
+    "cpu_seconds": 0.009999999999999995,
+    "rss_kib_min": 27816,
+    "rss_kib_max": 27944,
+    "path_after": {
+      "connection": 4080893173776,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 120,
+      "tx_bytes": 18716,
+      "tx_ios": 120,
+      "rx_datagrams": 123,
+      "rx_bytes": 59457,
+      "rx_ios": 125,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 113066,
+      "cwnd": 24021,
+      "pacing_rate_bps": 549576,
+      "in_flight": 187,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 122,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "auto",
+    "repeat": 1
+  },
+  {
+    "label": "setup-healthy-quic-off-r1",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 473.8222169689834
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.18844713643193
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.01182786375284
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.1361487172544
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.2215700894594
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.4984779022634
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.2343706525862
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.4951437674463
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.0260938629508
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 471.9612617045641
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.23862120881677
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.3787228576839
+      }
+    ],
+    "seconds": 5.668571833986789,
+    "decisions": {
+      "disabled": 12
+    },
+    "cpu_seconds": 0.039999999999999994,
+    "rss_kib_min": 28288,
+    "rss_kib_max": 28416,
+    "path_after": {
+      "connection": 3041880186896,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 184,
+      "tx_bytes": 27827,
+      "tx_ios": 184,
+      "rx_datagrams": 176,
+      "rx_bytes": 67621,
+      "rx_ios": 178,
+      "tx_frames": 88,
+      "rx_frames": 73,
+      "rtt_us": 117428,
+      "cwnd": 24040,
+      "pacing_rate_bps": 528416,
+      "in_flight": 146,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 186,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 789,
+      "datagram_queue_dequeued": 88,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "off",
+    "repeat": 1
+  },
+  {
+    "label": "setup-healthy-quic-auto-r2",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 217.30747492983937
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.03112714365125
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.95692122355103
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.84308333694935
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.7910349778831
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.84281418472528
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.71314008906484
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.89228510856628
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.77890310436487
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.7325940206647
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 215.66930785775185
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.01492865011096
+      }
+    ],
+    "seconds": 2.5920305722393095,
+    "decisions": {
+      "eligible": 12
+    },
+    "cpu_seconds": 0.030000000000000006,
+    "rss_kib_min": 27904,
+    "rss_kib_max": 28116,
+    "path_after": {
+      "connection": 4773020442640,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 118,
+      "tx_bytes": 18768,
+      "tx_ios": 118,
+      "rx_datagrams": 125,
+      "rx_bytes": 59673,
+      "rx_ios": 127,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 107349,
+      "cwnd": 24008,
+      "pacing_rate_bps": 578888,
+      "in_flight": 79,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 120,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "auto",
+    "repeat": 2
+  },
+  {
+    "label": "setup-healthy-quic-off-r2",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 430.75501592829823
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.691859357059
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 431.0468342155218
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.0383611805737
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.1805359534919
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.2702008970082
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.09739492461085
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.87470684945583
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.9686460979283
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.0754678659141
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.74152725562453
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.16020890697837
+      }
+    ],
+    "seconds": 5.152334816753864,
+    "decisions": {
+      "disabled": 12
+    },
+    "cpu_seconds": 0.04,
+    "rss_kib_min": 28288,
+    "rss_kib_max": 28288,
+    "path_after": {
+      "connection": 3024029229072,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 185,
+      "tx_bytes": 27818,
+      "tx_ios": 185,
+      "rx_datagrams": 177,
+      "rx_bytes": 67662,
+      "rx_ios": 179,
+      "tx_frames": 87,
+      "rx_frames": 73,
+      "rtt_us": 106540,
+      "cwnd": 24017,
+      "pacing_rate_bps": 581592,
+      "in_flight": 146,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 187,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 680,
+      "datagram_queue_dequeued": 87,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "off",
+    "repeat": 2
+  },
+  {
+    "label": "setup-healthy-quic-on-r2",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 219.0567017532885
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.59560734406114
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.8823629617691
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.7461011558771
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.81052539497614
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.76667500287294
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.9253588654101
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.77100798115134
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.88289800658822
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.6599491611123
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.6407243348658
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 216.90491400659084
+      }
+    ],
+    "seconds": 2.6040757172740996,
+    "decisions": {
+      "eligible": 12
+    },
+    "cpu_seconds": 0.019999999999999997,
+    "rss_kib_min": 28156,
+    "rss_kib_max": 28284,
+    "path_after": {
+      "connection": 3145395609616,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 115,
+      "tx_bytes": 20809,
+      "tx_ios": 115,
+      "rx_datagrams": 122,
+      "rx_bytes": 59398,
+      "rx_ios": 124,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 107736,
+      "cwnd": 24022,
+      "pacing_rate_bps": 575960,
+      "in_flight": 79,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 117,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "scenario": "healthy",
+    "mode": "on",
+    "repeat": 2
+  },
+  {
+    "label": "retained-capacity-quic-on-r0",
+    "kind": "capacity",
+    "requested": 12,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.4203431308269501,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.3336663357913494,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.28443383052945137,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.27519185096025467,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.2669701352715492,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.2366066910326481,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.23818016052246094,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.3052111715078354,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.2549099735915661,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.24165818467736244,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.24419324472546577,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.25697099044919014,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 0.0035772910341620445,
+    "decisions": {},
+    "cpu_seconds": 0.010000000000000009,
+    "rss_kib_min": 28416,
+    "rss_kib_max": 28544,
+    "path_after": {
+      "connection": 6147040878608,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 186,
+      "tx_bytes": 22276,
+      "tx_ios": 186,
+      "rx_datagrams": 182,
+      "rx_bytes": 16918,
+      "rx_ios": 184,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 112060,
+      "cwnd": 24055,
+      "pacing_rate_bps": 553336,
+      "in_flight": 80,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 188,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 32,
+    "held_decisions": {
+      "eligible": 32
+    },
+    "recovery_decisions": {
+      "eligible": 1
+    },
+    "scenario": "capacity",
+    "mode": "on",
+    "repeat": 0
+  },
+  {
+    "label": "retained-capacity-quic-auto-r0",
+    "kind": "capacity",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.96531404182315
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.46824995428324
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.3568200021982
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.45003281906247
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.4781499132514
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.76482962816954
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.27753092348576
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.614091809839
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.6408037021756
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.61384780332446
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.7669912278652
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 435.71482691913843
+      }
+    ],
+    "seconds": 5.228513508103788,
+    "decisions": {
+      "native_capacity": 12
+    },
+    "cpu_seconds": 0.039999999999999994,
+    "rss_kib_min": 24448,
+    "rss_kib_max": 28288,
+    "path_after": {
+      "connection": 6584724889616,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 308,
+      "tx_bytes": 33572,
+      "tx_ios": 308,
+      "rx_datagrams": 305,
+      "rx_bytes": 74293,
+      "rx_ios": 307,
+      "tx_frames": 83,
+      "rx_frames": 72,
+      "rtt_us": 108269,
+      "cwnd": 24024,
+      "pacing_rate_bps": 567232,
+      "in_flight": 86,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 310,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 778,
+      "datagram_queue_dequeued": 83,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 32,
+    "held_decisions": {
+      "eligible": 32
+    },
+    "recovery_decisions": {
+      "eligible": 1
+    },
+    "scenario": "capacity",
+    "mode": "auto",
+    "repeat": 0
+  },
+  {
+    "label": "retained-capacity-quic-on-r1",
+    "kind": "capacity",
+    "requested": 12,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.3904416225850582,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.3126501105725765,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.26815803721547127,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.2533271908760071,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.24744728580117226,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.28493208810687065,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.25005731731653214,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.24050893262028694,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.30307238921523094,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.2657352015376091,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.2496400848031044,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.25920569896698,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 0.0035944399423897266,
+    "decisions": {},
+    "cpu_seconds": 0.009999999999999995,
+    "rss_kib_min": 28636,
+    "rss_kib_max": 28764,
+    "path_after": {
+      "connection": 2772605870096,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 190,
+      "tx_bytes": 24743,
+      "tx_ios": 190,
+      "rx_datagrams": 187,
+      "rx_bytes": 17072,
+      "rx_ios": 189,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 111930,
+      "cwnd": 24025,
+      "pacing_rate_bps": 548584,
+      "in_flight": 40,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 192,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 32,
+    "held_decisions": {
+      "eligible": 32
+    },
+    "recovery_decisions": {
+      "eligible": 1
+    },
+    "scenario": "capacity",
+    "mode": "on",
+    "repeat": 1
+  },
+  {
+    "label": "retained-capacity-quic-auto-r1",
+    "kind": "capacity",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 430.67329190671444
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.45672385394573
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.54655596986413
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.38388977199793
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.6386279165745
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.40748296678066
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.34255907312036
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.3692959472537
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.412045981735
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.13961224257946
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.50654588639736
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 429.5882089063525
+      }
+    ],
+    "seconds": 5.155562536325306,
+    "decisions": {
+      "native_capacity": 12
+    },
+    "cpu_seconds": 0.04000000000000001,
+    "rss_kib_min": 21920,
+    "rss_kib_max": 28576,
+    "path_after": {
+      "connection": 3690151813136,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 315,
+      "tx_bytes": 31792,
+      "tx_ios": 315,
+      "rx_datagrams": 307,
+      "rx_bytes": 74587,
+      "rx_ios": 309,
+      "tx_frames": 83,
+      "rx_frames": 71,
+      "rtt_us": 106653,
+      "cwnd": 24021,
+      "pacing_rate_bps": 580640,
+      "in_flight": 86,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 317,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 541,
+      "datagram_queue_dequeued": 83,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 32,
+    "held_decisions": {
+      "eligible": 32
+    },
+    "recovery_decisions": {
+      "eligible": 1
+    },
+    "scenario": "capacity",
+    "mode": "auto",
+    "repeat": 1
+  },
+  {
+    "label": "retained-capacity-quic-on-r2",
+    "kind": "capacity",
+    "requested": 12,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.3906530328094959,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.31370390206575394,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.26490865275263786,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.24000462144613266,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.29153283685445786,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.27617812156677246,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.24487776681780815,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.23473287001252174,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.25070924311876297,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.2356930635869503,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.22704526782035828,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 0.2426672726869583,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 0.00351299112662673,
+    "decisions": {},
+    "cpu_seconds": 0.0,
+    "rss_kib_min": 28544,
+    "rss_kib_max": 28672,
+    "path_after": {
+      "connection": 3528151015440,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 186,
+      "tx_bytes": 24583,
+      "tx_ios": 186,
+      "rx_datagrams": 183,
+      "rx_bytes": 16917,
+      "rx_ios": 185,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 113849,
+      "cwnd": 24045,
+      "pacing_rate_bps": 544800,
+      "in_flight": 80,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 188,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 32,
+    "held_decisions": {
+      "eligible": 32
+    },
+    "recovery_decisions": {
+      "eligible": 1
+    },
+    "scenario": "capacity",
+    "mode": "on",
+    "repeat": 2
+  },
+  {
+    "label": "retained-capacity-quic-auto-r2",
+    "kind": "capacity",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 455.08631505072117
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.92212381213903
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.4617189094424
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.39558383077383
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.4223682023585
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.8259899020195
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.391831997782
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.6020859852433
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.7288389876485
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.4260851107538
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.55555571243167
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 454.5121490955353
+      }
+    ],
+    "seconds": 5.45583552820608,
+    "decisions": {
+      "native_capacity": 12
+    },
+    "cpu_seconds": 0.04000000000000001,
+    "rss_kib_min": 28412,
+    "rss_kib_max": 28796,
+    "path_after": {
+      "connection": 3971035897872,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 318,
+      "tx_bytes": 32445,
+      "tx_ios": 318,
+      "rx_datagrams": 311,
+      "rx_bytes": 75332,
+      "rx_ios": 313,
+      "tx_frames": 84,
+      "rx_frames": 72,
+      "rtt_us": 113064,
+      "cwnd": 24041,
+      "pacing_rate_bps": 547704,
+      "in_flight": 172,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 320,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 657,
+      "datagram_queue_dequeued": 84,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 32,
+    "held_decisions": {
+      "eligible": 32
+    },
+    "recovery_decisions": {
+      "eligible": 1
+    },
+    "scenario": "capacity",
+    "mode": "auto",
+    "repeat": 2
+  },
+  {
+    "label": "refusal-quic-off-r0",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 441.1514759995043
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.6662451066077
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.56770093366504
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.8771039880812
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.79282534867525
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.9608713313937
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.86845572665334
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.8155151605606
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.80192483589053
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.86295626685023
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.97247887030244
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 436.71681405976415
+      }
+    ],
+    "seconds": 5.246467793826014,
+    "decisions": {
+      "disabled": 12
+    },
+    "cpu_seconds": 0.03,
+    "rss_kib_min": 26112,
+    "rss_kib_max": 26368,
+    "path_after": {
+      "connection": 6018225414160,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 184,
+      "tx_bytes": 27747,
+      "tx_ios": 184,
+      "rx_datagrams": 175,
+      "rx_bytes": 67680,
+      "rx_ios": 177,
+      "tx_frames": 87,
+      "rx_frames": 74,
+      "rtt_us": 108573,
+      "cwnd": 24072,
+      "pacing_rate_bps": 570624,
+      "in_flight": 146,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 186,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 626,
+      "datagram_queue_dequeued": 87,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-off-r0-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 438.50788893178105
+        }
+      ],
+      "seconds": 0.43882296700030565,
+      "decisions": {
+        "disabled": 1
+      },
+      "cpu_seconds": 0.0,
+      "rss_kib_min": 23424,
+      "rss_kib_max": 23552,
+      "path_after": {
+        "connection": 6018225414160,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 194,
+        "tx_bytes": 28491,
+        "tx_ios": 194,
+        "rx_datagrams": 186,
+        "rx_bytes": 72490,
+        "rx_ios": 188,
+        "tx_frames": 94,
+        "rx_frames": 80,
+        "rtt_us": 108578,
+        "cwnd": 24072,
+        "pacing_rate_bps": 570624,
+        "in_flight": 146,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 196,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 684,
+        "datagram_queue_dequeued": 94,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.8533275830559433,
+    "scenario": "refusal",
+    "mode": "off",
+    "repeat": 0
+  },
+  {
+    "label": "refusal-quic-on-r0",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 115.85475690662861,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.50163801014423,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.62355791404843,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.51060105860233,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.54153680056334,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.51664999872446,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.59529879316688,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.45435802266002,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.4974749982357,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.61636391282082,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.40997305139899,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 112.44104523211718,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 1.3543451018631458,
+    "decisions": {},
+    "cpu_seconds": 0.0,
+    "rss_kib_min": 28144,
+    "rss_kib_max": 28144,
+    "path_after": {
+      "connection": 5269055610896,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 88,
+      "tx_bytes": 19801,
+      "tx_ios": 88,
+      "rx_datagrams": 73,
+      "rx_bytes": 12814,
+      "rx_ios": 75,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 111910,
+      "cwnd": 24020,
+      "pacing_rate_bps": 553688,
+      "in_flight": 113,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 90,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-on-r0-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 226.88008891418576
+        }
+      ],
+      "seconds": 0.2271635769866407,
+      "decisions": {
+        "eligible": 1
+      },
+      "cpu_seconds": 0.0,
+      "rss_kib_min": 28144,
+      "rss_kib_max": 28144,
+      "path_after": {
+        "connection": 5269055610896,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 104,
+        "tx_bytes": 20701,
+        "tx_ios": 104,
+        "rx_datagrams": 86,
+        "rx_bytes": 13478,
+        "rx_ios": 88,
+        "tx_frames": 0,
+        "rx_frames": 0,
+        "rtt_us": 111862,
+        "cwnd": 24020,
+        "pacing_rate_bps": 553688,
+        "in_flight": 71,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 106,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 0,
+        "datagram_queue_dequeued": 0,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.6192478330340236,
+    "scenario": "refusal",
+    "mode": "on",
+    "repeat": 0
+  },
+  {
+    "label": "refusal-quic-auto-r0",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 592.8096552379429
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 473.07628812268376
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 473.22106873616576
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 473.16940734162927
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 473.00423216074705
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 590.5918320640922
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.99023205414414
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.89837105199695
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 473.0544467456639
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.7004673331976
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 472.72889316082
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 473.0327520519495
+      }
+    ],
+    "seconds": 5.91366229718551,
+    "decisions": {
+      "native_refused_before_admission": 2,
+      "native_cooldown": 10
+    },
+    "cpu_seconds": 0.03,
+    "rss_kib_min": 27904,
+    "rss_kib_max": 28288,
+    "path_after": {
+      "connection": 3405408903184,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 188,
+      "tx_bytes": 25464,
+      "tx_ios": 188,
+      "rx_datagrams": 180,
+      "rx_bytes": 69746,
+      "rx_ios": 182,
+      "tx_frames": 83,
+      "rx_frames": 71,
+      "rtt_us": 117626,
+      "cwnd": 24052,
+      "pacing_rate_bps": 522664,
+      "in_flight": 86,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 190,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 626,
+      "datagram_queue_dequeued": 83,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-auto-r0-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 237.94834222644567
+        }
+      ],
+      "seconds": 0.23827821714803576,
+      "decisions": {
+        "eligible": 1
+      },
+      "cpu_seconds": 0.0,
+      "rss_kib_min": 28288,
+      "rss_kib_max": 28416,
+      "path_after": {
+        "connection": 3405408903184,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 194,
+        "tx_bytes": 25773,
+        "tx_ios": 194,
+        "rx_datagrams": 185,
+        "rx_bytes": 69975,
+        "rx_ios": 187,
+        "tx_frames": 84,
+        "rx_frames": 72,
+        "rtt_us": 117594,
+        "cwnd": 24052,
+        "pacing_rate_bps": 522664,
+        "in_flight": 71,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 196,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 633,
+        "datagram_queue_dequeued": 84,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.8452475410886109,
+    "scenario": "refusal",
+    "mode": "auto",
+    "repeat": 0
+  },
+  {
+    "label": "refusal-quic-off-r1",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 438.5946858674288
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.280795045197
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.7310150042176
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.4662488438189
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.15997037664056
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.39375702291727
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.3155692331493
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.43331494927406
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.3845946714282
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.6025940030813
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.30917197838426
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 434.48939407244325
+      }
+    ],
+    "seconds": 5.217514123767614,
+    "decisions": {
+      "disabled": 12
+    },
+    "cpu_seconds": 0.039999999999999994,
+    "rss_kib_min": 27644,
+    "rss_kib_max": 27772,
+    "path_after": {
+      "connection": 2433773215760,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 184,
+      "tx_bytes": 25524,
+      "tx_ios": 184,
+      "rx_datagrams": 176,
+      "rx_bytes": 69820,
+      "rx_ios": 178,
+      "tx_frames": 89,
+      "rx_frames": 75,
+      "rtt_us": 107979,
+      "cwnd": 24074,
+      "pacing_rate_bps": 574320,
+      "in_flight": 86,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 186,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 684,
+      "datagram_queue_dequeued": 89,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-off-r1-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 435.758912935853
+        }
+      ],
+      "seconds": 0.4361319770105183,
+      "decisions": {
+        "disabled": 1
+      },
+      "cpu_seconds": 0.010000000000000009,
+      "rss_kib_min": 27772,
+      "rss_kib_max": 27772,
+      "path_after": {
+        "connection": 2433773215760,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 195,
+        "tx_bytes": 26294,
+        "tx_ios": 195,
+        "rx_datagrams": 187,
+        "rx_bytes": 74630,
+        "rx_ios": 189,
+        "tx_frames": 96,
+        "rx_frames": 81,
+        "rtt_us": 107945,
+        "cwnd": 24074,
+        "pacing_rate_bps": 574320,
+        "in_flight": 86,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 197,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 732,
+        "datagram_queue_dequeued": 96,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.8406445840373635,
+    "scenario": "refusal",
+    "mode": "off",
+    "repeat": 1
+  },
+  {
+    "label": "refusal-quic-on-r1",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 109.44259213283658,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.85746108740568,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.83883323892951,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.96198900789022,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.84464608877897,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.80483530834317,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.80926002189517,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.84328496083617,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.96548519283533,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 108.01659896969795,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.97991696745157,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 107.9250080510974,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 1.296775319147855,
+    "decisions": {},
+    "cpu_seconds": 0.019999999999999997,
+    "rss_kib_min": 28108,
+    "rss_kib_max": 28108,
+    "path_after": {
+      "connection": 6010843439120,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 93,
+      "tx_bytes": 20194,
+      "tx_ios": 93,
+      "rx_datagrams": 76,
+      "rx_bytes": 13129,
+      "rx_ios": 78,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 107365,
+      "cwnd": 24022,
+      "pacing_rate_bps": 577872,
+      "in_flight": 113,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 95,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-on-r1-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 217.6094208844006
+        }
+      ],
+      "seconds": 0.21787544712424278,
+      "decisions": {
+        "eligible": 1
+      },
+      "cpu_seconds": 0.0,
+      "rss_kib_min": 28236,
+      "rss_kib_max": 28236,
+      "path_after": {
+        "connection": 6010843439120,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 104,
+        "tx_bytes": 20678,
+        "tx_ios": 104,
+        "rx_datagrams": 85,
+        "rx_bytes": 13496,
+        "rx_ios": 87,
+        "tx_frames": 0,
+        "rx_frames": 0,
+        "rtt_us": 107312,
+        "cwnd": 24022,
+        "pacing_rate_bps": 577872,
+        "in_flight": 71,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 106,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 0,
+        "datagram_queue_dequeued": 0,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.6305572090204805,
+    "scenario": "refusal",
+    "mode": "on",
+    "repeat": 1
+  },
+  {
+    "label": "refusal-quic-auto-r1",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 535.652092192322
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.57187504321337
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.5296307168901
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.4709699675441
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.59182024747133
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 533.8795543648303
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.069494035095
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.36081313341856
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.30467580258846
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.3567940108478
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.3979989811778
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 427.39547742530704
+      }
+    ],
+    "seconds": 5.3443320957012475,
+    "decisions": {
+      "native_refused_before_admission": 2,
+      "native_cooldown": 10
+    },
+    "cpu_seconds": 0.039999999999999994,
+    "rss_kib_min": 26236,
+    "rss_kib_max": 26492,
+    "path_after": {
+      "connection": 2420150116368,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 191,
+      "tx_bytes": 27824,
+      "tx_ios": 191,
+      "rx_datagrams": 178,
+      "rx_bytes": 67531,
+      "rx_ios": 180,
+      "tx_frames": 82,
+      "rx_frames": 69,
+      "rtt_us": 106236,
+      "cwnd": 24000,
+      "pacing_rate_bps": 589184,
+      "in_flight": 146,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 193,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 571,
+      "datagram_queue_dequeued": 82,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-auto-r1-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 217.67962304875255
+        }
+      ],
+      "seconds": 0.217958876863122,
+      "decisions": {
+        "eligible": 1
+      },
+      "cpu_seconds": 0.0,
+      "rss_kib_min": 26492,
+      "rss_kib_max": 26492,
+      "path_after": {
+        "connection": 2420150116368,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 199,
+        "tx_bytes": 28254,
+        "tx_ios": 199,
+        "rx_datagrams": 186,
+        "rx_bytes": 70018,
+        "rx_ios": 188,
+        "tx_frames": 84,
+        "rx_frames": 72,
+        "rtt_us": 106223,
+        "cwnd": 24000,
+        "pacing_rate_bps": 589184,
+        "in_flight": 71,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 201,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 582,
+        "datagram_queue_dequeued": 84,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.6892878338694572,
+    "scenario": "refusal",
+    "mode": "auto",
+    "repeat": 1
+  },
+  {
+    "label": "refusal-quic-off-r2",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 430.850547272712
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.46604296937585
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.3021851442754
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.2191931270063
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.49480314180255
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.59678203240037
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.43455309048295
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.2093858346343
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.42648178339005
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.29675786197186
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.4637928940356
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 428.61207900568843
+      }
+    ],
+    "seconds": 5.143752020783722,
+    "decisions": {
+      "disabled": 12
+    },
+    "cpu_seconds": 0.05,
+    "rss_kib_min": 28232,
+    "rss_kib_max": 28488,
+    "path_after": {
+      "connection": 5231642419216,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 187,
+      "tx_bytes": 27962,
+      "tx_ios": 187,
+      "rx_datagrams": 179,
+      "rx_bytes": 69901,
+      "rx_ios": 181,
+      "tx_frames": 89,
+      "rx_frames": 75,
+      "rtt_us": 106500,
+      "cwnd": 24064,
+      "pacing_rate_bps": 575936,
+      "in_flight": 86,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 189,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 710,
+      "datagram_queue_dequeued": 89,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-off-r2-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 429.6661699190736
+        }
+      ],
+      "seconds": 0.42993574030697346,
+      "decisions": {
+        "disabled": 1
+      },
+      "cpu_seconds": 0.0,
+      "rss_kib_min": 28488,
+      "rss_kib_max": 28488,
+      "path_after": {
+        "connection": 5231642419216,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 196,
+        "tx_bytes": 28610,
+        "tx_ios": 196,
+        "rx_datagrams": 187,
+        "rx_bytes": 72453,
+        "rx_ios": 189,
+        "tx_frames": 95,
+        "rx_frames": 79,
+        "rtt_us": 106561,
+        "cwnd": 24064,
+        "pacing_rate_bps": 575936,
+        "in_flight": 172,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 198,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 749,
+        "datagram_queue_dequeued": 95,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.8004835839383304,
+    "scenario": "refusal",
+    "mode": "off",
+    "repeat": 2
+  },
+  {
+    "label": "refusal-quic-on-r2",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 113.0915624089539,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.78242601454258,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.96138383820653,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.77229788154364,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.6454778239131,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.82655300945044,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.65795987471938,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.7570218630135,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.6653149947524,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.73816211521626,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.78004089742899,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 111.63176596164703,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 1.342779888305813,
+    "decisions": {},
+    "cpu_seconds": 0.019999999999999997,
+    "rss_kib_min": 28288,
+    "rss_kib_max": 28288,
+    "path_after": {
+      "connection": 3681528324112,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 93,
+      "tx_bytes": 20016,
+      "tx_ios": 93,
+      "rx_datagrams": 75,
+      "rx_bytes": 12907,
+      "rx_ios": 77,
+      "tx_frames": 0,
+      "rx_frames": 0,
+      "rtt_us": 111140,
+      "cwnd": 24028,
+      "pacing_rate_bps": 557656,
+      "in_flight": 113,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 95,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 0,
+      "datagram_queue_dequeued": 0,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-on-r2-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 225.08906433358788
+        }
+      ],
+      "seconds": 0.22546533215790987,
+      "decisions": {
+        "eligible": 1
+      },
+      "cpu_seconds": 0.0,
+      "rss_kib_min": 28288,
+      "rss_kib_max": 28288,
+      "path_after": {
+        "connection": 3681528324112,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 103,
+        "tx_bytes": 20660,
+        "tx_ios": 103,
+        "rx_datagrams": 84,
+        "rx_bytes": 13422,
+        "rx_ios": 86,
+        "tx_frames": 0,
+        "rx_frames": 0,
+        "rtt_us": 111123,
+        "cwnd": 24028,
+        "pacing_rate_bps": 557656,
+        "in_flight": 79,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 105,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 0,
+        "datagram_queue_dequeued": 0,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.6194404580164701,
+    "scenario": "refusal",
+    "mode": "on",
+    "repeat": 2
+  },
+  {
+    "label": "refusal-quic-auto-r2",
+    "kind": "short",
+    "requested": 12,
+    "succeeded": 12,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 575.6310969591141
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 459.19166086241603
+      },
+      {
+        "index": 2,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 459.11756437271833
+      },
+      {
+        "index": 3,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 459.0501659549773
+      },
+      {
+        "index": 4,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 459.3503107316792
+      },
+      {
+        "index": 5,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 573.3506889082491
+      },
+      {
+        "index": 6,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 459.2164591886103
+      },
+      {
+        "index": 7,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 458.99801002815366
+      },
+      {
+        "index": 8,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 458.77008093521
+      },
+      {
+        "index": 9,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 458.78420816734433
+      },
+      {
+        "index": 10,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 458.83502531796694
+      },
+      {
+        "index": 11,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 459.0158578939736
+      }
+    ],
+    "seconds": 5.739675707183778,
+    "decisions": {
+      "native_refused_before_admission": 2,
+      "native_cooldown": 10
+    },
+    "cpu_seconds": 0.03,
+    "rss_kib_min": 28084,
+    "rss_kib_max": 28212,
+    "path_after": {
+      "connection": 3249280131088,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 187,
+      "tx_bytes": 27753,
+      "tx_ios": 187,
+      "rx_datagrams": 178,
+      "rx_bytes": 67557,
+      "rx_ios": 180,
+      "tx_frames": 82,
+      "rx_frames": 70,
+      "rtt_us": 114092,
+      "cwnd": 24077,
+      "pacing_rate_bps": 543136,
+      "in_flight": 146,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 189,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 680,
+      "datagram_queue_dequeued": 82,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "recovery": {
+      "label": "refusal-quic-auto-r2-recovery-0",
+      "kind": "short",
+      "requested": 1,
+      "succeeded": 1,
+      "records": [
+        {
+          "index": 0,
+          "delivered_bytes": 4096,
+          "success": true,
+          "milliseconds": 231.11059423536062
+        }
+      ],
+      "seconds": 0.23143069306388497,
+      "decisions": {
+        "eligible": 1
+      },
+      "cpu_seconds": 0.0,
+      "rss_kib_min": 28212,
+      "rss_kib_max": 28212,
+      "path_after": {
+        "connection": 3249280131088,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 195,
+        "tx_bytes": 28184,
+        "tx_ios": 195,
+        "rx_datagrams": 186,
+        "rx_bytes": 70044,
+        "rx_ios": 188,
+        "tx_frames": 84,
+        "rx_frames": 73,
+        "rtt_us": 114053,
+        "cwnd": 24077,
+        "pacing_rate_bps": 543136,
+        "in_flight": 71,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 197,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 691,
+        "datagram_queue_dequeued": 84,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    "recovery_elapsed_seconds": 0.6569133750163019,
+    "scenario": "refusal",
+    "mode": "auto",
+    "repeat": 2
+  },
+  {
+    "label": "slow-quic-off-r0",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 2,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 446.38230884447694
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 445.72200207039714
+      }
+    ],
+    "seconds": 0.8924221470952034,
+    "decisions": {
+      "disabled": 2
+    },
+    "cpu_seconds": 0.020000000000000018,
+    "rss_kib_min": 34444,
+    "rss_kib_max": 34444,
+    "path_after": {
+      "connection": 4724668506128,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 3282,
+      "tx_bytes": 289210,
+      "tx_ios": 3282,
+      "rx_datagrams": 13739,
+      "rx_bytes": 16325181,
+      "rx_ios": 13741,
+      "tx_frames": 2791,
+      "rx_frames": 13509,
+      "rtt_us": 110574,
+      "cwnd": 76399,
+      "pacing_rate_bps": 4970024,
+      "in_flight": 371,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 3284,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 14472,
+      "datagram_queue_dequeued": 2791,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 39,
+      "received": 39,
+      "timeouts": 0,
+      "rtt_ms": [
+        111.7211151868105,
+        111.3748038187623,
+        111.33931716904044,
+        111.36993207037449,
+        135.87573682889342,
+        222.84779185429215,
+        111.4014140330255,
+        111.85530666261911,
+        111.40755889937282,
+        112.16553067788482,
+        111.39767291024327,
+        111.9595617055893,
+        111.09928507357836,
+        112.31418559327722,
+        111.27156391739845,
+        111.23133962973952,
+        111.05167772620916,
+        111.08839884400368,
+        111.34947231039405,
+        111.51201603934169,
+        111.46814282983541,
+        111.3926381804049,
+        111.40565108507872,
+        111.37220775708556,
+        111.40061495825648,
+        111.61975795403123,
+        111.33987503126264,
+        111.37822596356273,
+        111.50311212986708,
+        111.43442103639245,
+        111.43745994195342,
+        111.39147914946079,
+        111.35521810501814,
+        111.36780213564634,
+        111.52344476431608,
+        111.34111508727074,
+        111.39073362573981,
+        111.47035704925656,
+        111.4160199649632
+      ]
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "off",
+    "repeat": 0
+  },
+  {
+    "label": "slow-quic-on-r0",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10002.229548990726,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10002.388060092926,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 20.005201773252338,
+    "decisions": {},
+    "cpu_seconds": 0.04999999999999999,
+    "rss_kib_min": 25784,
+    "rss_kib_max": 27320,
+    "path_after": {
+      "connection": 4077034414096,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 1100,
+      "tx_bytes": 61939,
+      "tx_ios": 1100,
+      "rx_datagrams": 10081,
+      "rx_bytes": 14062976,
+      "rx_ios": 10083,
+      "tx_frames": 58,
+      "rx_frames": 16,
+      "rtt_us": 116485,
+      "cwnd": 24004,
+      "pacing_rate_bps": 522552,
+      "in_flight": 0,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 1102,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 873,
+      "datagram_queue_dequeued": 58,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 59,
+      "received": 16,
+      "timeouts": 43,
+      "rtt_ms": [
+        117.34415590763092,
+        183.3696630783379,
+        185.17987802624702,
+        122.37710505723953,
+        117.27048316970468,
+        117.39697540178895,
+        118.65125084295869,
+        118.03041119128466,
+        117.62529006227851,
+        116.97862902656198,
+        117.57155600935221,
+        117.17185890302062,
+        117.24203871563077,
+        117.19981580972672,
+        117.23122885450721,
+        117.34681390225887
+      ]
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "on",
+    "repeat": 0
+  },
+  {
+    "label": "slow-quic-auto-r0",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10003.17605305463,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10009.848343208432,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 20.01384208817035,
+    "decisions": {
+      "native_cooldown": 1
+    },
+    "cpu_seconds": 0.060000000000000026,
+    "rss_kib_min": 19708,
+    "rss_kib_max": 27772,
+    "path_after": {
+      "connection": 3966606778384,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 1140,
+      "tx_bytes": 67832,
+      "tx_ios": 1140,
+      "rx_datagrams": 10047,
+      "rx_bytes": 14031968,
+      "rx_ios": 10049,
+      "tx_frames": 59,
+      "rx_frames": 11,
+      "rtt_us": 108568,
+      "cwnd": 24007,
+      "pacing_rate_bps": 576512,
+      "in_flight": 0,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 1142,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 885,
+      "datagram_queue_dequeued": 59,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 55,
+      "received": 11,
+      "timeouts": 44,
+      "rtt_ms": [
+        110.77828239649534,
+        166.1056550219655,
+        169.4585019722581,
+        114.47501089423895,
+        111.81180691346526,
+        109.21067837625742,
+        109.56199700012803,
+        111.73703102394938,
+        109.99796912074089,
+        109.57069508731365,
+        110.05651904270053
+      ]
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "auto",
+    "repeat": 0
+  },
+  {
+    "label": "slow-quic-on-r1",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10001.655817963183,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10001.70388026163,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 20.00369419110939,
+    "decisions": {},
+    "cpu_seconds": 0.040000000000000036,
+    "rss_kib_min": 19672,
+    "rss_kib_max": 21464,
+    "path_after": {
+      "connection": 6562411192336,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 1446,
+      "tx_bytes": 73507,
+      "tx_ios": 1446,
+      "rx_datagrams": 9778,
+      "rx_bytes": 14089470,
+      "rx_ios": 9780,
+      "tx_frames": 13,
+      "rx_frames": 13,
+      "rtt_us": 111895,
+      "cwnd": 24052,
+      "pacing_rate_bps": 554264,
+      "in_flight": 189,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 1448,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 160,
+      "datagram_queue_dequeued": 13,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 13,
+      "received": 11,
+      "timeouts": 1,
+      "rtt_ms": [
+        112.915791105479,
+        174.56210078671575,
+        175.63629103824496,
+        112.60246997699142,
+        117.86040989682078,
+        120.00344507396221,
+        112.75321198627353,
+        117.80776688829064,
+        117.8793222643435,
+        117.7481934428215,
+        225.4105182364583
+      ],
+      "error": ""
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "on",
+    "repeat": 1
+  },
+  {
+    "label": "slow-quic-auto-r1",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10001.907496713102,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10001.337791327387,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 20.003522782120854,
+    "decisions": {
+      "native_cooldown": 1
+    },
+    "cpu_seconds": 0.05000000000000002,
+    "rss_kib_min": 26508,
+    "rss_kib_max": 29324,
+    "path_after": {
+      "connection": 2741970608144,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 1105,
+      "tx_bytes": 64136,
+      "tx_ios": 1105,
+      "rx_datagrams": 10040,
+      "rx_bytes": 14023062,
+      "rx_ios": 10042,
+      "tx_frames": 62,
+      "rx_frames": 16,
+      "rtt_us": 112648,
+      "cwnd": 24031,
+      "pacing_rate_bps": 550296,
+      "in_flight": 0,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 1107,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 870,
+      "datagram_queue_dequeued": 62,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 59,
+      "received": 16,
+      "timeouts": 43,
+      "rtt_ms": [
+        114.74908282980323,
+        174.77458203211427,
+        177.5790248066187,
+        115.13067409396172,
+        114.00503199547529,
+        113.26106218621135,
+        114.66277297586203,
+        114.30457094684243,
+        114.17779698967934,
+        113.14999498426914,
+        115.67209707573056,
+        113.26811369508505,
+        113.38503565639257,
+        113.38661517947912,
+        113.29395603388548,
+        113.49571496248245
+      ]
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "auto",
+    "repeat": 1
+  },
+  {
+    "label": "slow-quic-off-r1",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 2,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 432.27359326556325
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 432.0655558258295
+      }
+    ],
+    "seconds": 0.8646478019654751,
+    "decisions": {
+      "disabled": 2
+    },
+    "cpu_seconds": 0.010000000000000009,
+    "rss_kib_min": 29952,
+    "rss_kib_max": 30720,
+    "path_after": {
+      "connection": 5740461957136,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 4037,
+      "tx_bytes": 410049,
+      "tx_ios": 4037,
+      "rx_datagrams": 16569,
+      "rx_bytes": 19793134,
+      "rx_ios": 16571,
+      "tx_frames": 4426,
+      "rx_frames": 16483,
+      "rtt_us": 107230,
+      "cwnd": 188145,
+      "pacing_rate_bps": 13835904,
+      "in_flight": 225,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 4039,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 23797,
+      "datagram_queue_dequeued": 4426,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 40,
+      "received": 40,
+      "timeouts": 0,
+      "rtt_ms": [
+        107.9609552398324,
+        108.15058322623372,
+        108.11893409118056,
+        108.10290509834886,
+        124.47366118431091,
+        108.6931019090116,
+        108.02681976929307,
+        107.70930629223585,
+        107.83312888815999,
+        109.47450064122677,
+        107.80715895816684,
+        107.70214814692736,
+        107.60385077446699,
+        108.01355307921767,
+        110.20391015335917,
+        112.15840606018901,
+        107.74097079411149,
+        107.78704332187772,
+        107.93536901473999,
+        108.03119698539376,
+        108.10833005234599,
+        108.04702993482351,
+        107.96290915459394,
+        108.06639585644007,
+        108.24820306152105,
+        108.03730599582195,
+        107.9886220395565,
+        108.07619383558631,
+        108.09474298730493,
+        108.0500460229814,
+        108.06949902325869,
+        107.97472111880779,
+        107.94851183891296,
+        107.97504894435406,
+        108.09751972556114,
+        107.9401345923543,
+        108.05688612163067,
+        107.8472463414073,
+        108.06220583617687,
+        108.09340421110392
+      ]
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "off",
+    "repeat": 1
+  },
+  {
+    "label": "slow-quic-auto-r2",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10000.80702174455,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10001.208375673741,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 20.00233282893896,
+    "decisions": {
+      "native_cooldown": 1
+    },
+    "cpu_seconds": 0.05000000000000002,
+    "rss_kib_min": 33972,
+    "rss_kib_max": 34100,
+    "path_after": {
+      "connection": 5517626843152,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 1145,
+      "tx_bytes": 66033,
+      "tx_ios": 1145,
+      "rx_datagrams": 10026,
+      "rx_bytes": 14021044,
+      "rx_ios": 10028,
+      "tx_frames": 63,
+      "rx_frames": 16,
+      "rtt_us": 108397,
+      "cwnd": 24027,
+      "pacing_rate_bps": 570992,
+      "in_flight": 139,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 1147,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 920,
+      "datagram_queue_dequeued": 63,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 59,
+      "received": 16,
+      "timeouts": 43,
+      "rtt_ms": [
+        109.34990411624312,
+        167.14103426784277,
+        168.9795469865203,
+        109.85436290502548,
+        115.88824400678277,
+        109.21726608648896,
+        109.14199287071824,
+        110.86048791185021,
+        109.60412723943591,
+        110.1086619310081,
+        108.81482716649771,
+        109.10923779010773,
+        109.06240530312061,
+        109.50891626998782,
+        109.09552685916424,
+        109.09574618563056
+      ]
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "auto",
+    "repeat": 2
+  },
+  {
+    "label": "slow-quic-off-r2",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 2,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 456.73248264938593
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 4096,
+        "success": true,
+        "milliseconds": 453.59064685180783
+      }
+    ],
+    "seconds": 0.9106244440190494,
+    "decisions": {
+      "disabled": 2
+    },
+    "cpu_seconds": 0.020000000000000018,
+    "rss_kib_min": 24292,
+    "rss_kib_max": 25700,
+    "path_after": {
+      "connection": 5172318117904,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 4615,
+      "tx_bytes": 419872,
+      "tx_ios": 4615,
+      "rx_datagrams": 16298,
+      "rx_bytes": 19693857,
+      "rx_ios": 16300,
+      "tx_frames": 4305,
+      "rx_frames": 16269,
+      "rtt_us": 112564,
+      "cwnd": 150641,
+      "pacing_rate_bps": 10525512,
+      "in_flight": 86,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 4617,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 18991,
+      "datagram_queue_dequeued": 4305,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 39,
+      "received": 39,
+      "timeouts": 0,
+      "rtt_ms": [
+        113.31881815567613,
+        113.41628385707736,
+        113.40255476534367,
+        188.90299135819077,
+        182.79867805540562,
+        113.30551514402032,
+        113.35122585296631,
+        113.87014482170343,
+        113.33573702722788,
+        113.20637306198478,
+        113.19321906194091,
+        114.3919387832284,
+        120.28185511007905,
+        114.89407392218709,
+        113.21201687678695,
+        112.98407893627882,
+        113.17249806597829,
+        113.6325029656291,
+        113.35672996938229,
+        113.59894508495927,
+        113.32820635288954,
+        113.41284494847059,
+        113.31041902303696,
+        113.21243038401008,
+        113.45417611300945,
+        113.43974992632866,
+        113.29597095027566,
+        113.42221219092607,
+        113.36064897477627,
+        113.46003878861666,
+        113.3307171985507,
+        113.52253891527653,
+        113.48983412608504,
+        113.39609697461128,
+        113.44056995585561,
+        113.30556124448776,
+        113.3126299828291,
+        113.5277790017426,
+        113.41237090528011
+      ]
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "off",
+    "repeat": 2
+  },
+  {
+    "label": "slow-quic-on-r2",
+    "kind": "slow_reader",
+    "requested": 2,
+    "succeeded": 0,
+    "records": [
+      {
+        "index": 0,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10001.730187330395,
+        "error": "Missing 4 bytes"
+      },
+      {
+        "index": 1,
+        "delivered_bytes": 0,
+        "success": false,
+        "milliseconds": 10001.672280952334,
+        "error": "Missing 4 bytes"
+      }
+    ],
+    "seconds": 20.003982099238783,
+    "decisions": {},
+    "cpu_seconds": 0.05000000000000002,
+    "rss_kib_min": 33356,
+    "rss_kib_max": 33484,
+    "path_after": {
+      "connection": 6109560578064,
+      "remote": 208,
+      "migration_rejections": 0,
+      "tx_datagrams": 1109,
+      "tx_bytes": 66279,
+      "tx_ios": 1109,
+      "rx_datagrams": 10016,
+      "rx_bytes": 14027852,
+      "rx_ios": 10018,
+      "tx_frames": 55,
+      "rx_frames": 11,
+      "rtt_us": 107523,
+      "cwnd": 24052,
+      "pacing_rate_bps": 582608,
+      "in_flight": 0,
+      "congestion_events": 0,
+      "lost_packets": 0,
+      "lost_bytes": 0,
+      "sent_packets": 1111,
+      "mtu": 1452,
+      "send_buffer_space": 278784,
+      "datagram_queue_sojourn_us": 806,
+      "datagram_queue_dequeued": 55,
+      "datagram_queue_congestions": 0,
+      "datagram_queue_head_sojourn_us": 0
+    },
+    "held_streams": 4,
+    "receiver_buffers_reported": [
+      65536,
+      65536,
+      65536,
+      65536
+    ],
+    "mixed_udp": {
+      "sent": 55,
+      "received": 11,
+      "timeouts": 44,
+      "rtt_ms": [
+        108.82585402578115,
+        165.55021097883582,
+        167.09667025133967,
+        113.50264400243759,
+        110.43826583772898,
+        108.27177204191685,
+        108.31705806776881,
+        108.60027791932225,
+        107.93449496850371,
+        109.08591654151678,
+        108.70155738666654
+      ]
+    },
+    "background_bytes_per_stream": 33554432,
+    "background_delivery": "Readers intentionally stop. These transfers are cancelled after the short requests.",
+    "scenario": "slow",
+    "mode": "on",
+    "repeat": 2
+  }
+]

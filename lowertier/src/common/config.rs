@@ -39,6 +39,7 @@ pub fn gen_default_flags() -> Flags {
     Flags {
         default_protocol: "quic".to_string(),
         h2_tcp_proxy: "off".to_string(),
+        quic_tcp_proxy: "auto".to_string(),
         enabled_protocols: Vec::new(),
         dev_name: "".to_string(),
         enable_ipv6: true,
@@ -125,6 +126,10 @@ pub fn validate_flags_with_network_secret(
     anyhow::ensure!(
         matches!(flags.h2_tcp_proxy.as_str(), "off" | "on" | "auto"),
         "transport.h2.tcp_proxy must be off, on, or auto"
+    );
+    anyhow::ensure!(
+        matches!(flags.quic_tcp_proxy.as_str(), "off" | "on" | "auto"),
+        "transport.quic.tcp_proxy must be off, on, or auto"
     );
     anyhow::ensure!(
         flags

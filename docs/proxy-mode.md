@@ -57,21 +57,27 @@ Fragment reassembly also separates peers, including fragments with identical IPv
 
 Targets inside the network must be IPv4 for now.
 
-## H2 TCP streams
+## Native TCP streams
 
-Set the H2 mode on both peers:
+Set the transport mode on both peers:
 
 ```toml
 [transport.h2]
+tcp_proxy = "auto"
+
+[transport.quic]
 tcp_proxy = "auto"
 ```
 
 | Mode | New TCP flows |
 | --- | --- |
-| `off` | Use the packet path. This is the default. |
-| `on` | Require native streams for eligible direct H2 flows. Report native capability, capacity, and open errors. |
+| `off` | Use the packet path. |
+| `on` | Require native streams for eligible direct flows. Report native capability, capacity, and open errors. |
 | `auto` | Use native streams when scope, capacity, and health permit. Permit safe packet fallback before destination admission. |
 
+QUIC defaults to `auto`.
+H2 defaults to `off`.
+The retained test fleet explicitly selects H2 `auto`.
 Mode changes apply to new flows.
 Admitted streams continue after a mode change.
 Authentication loss or an ACL change can stop an admitted stream.
@@ -79,7 +85,7 @@ Authentication loss or an ACL change can stop an admitted stream.
 The remote userspace peer checks the source identity and destination before opening a local socket.
 Protected GUI ports, kernel peers, and other destinations outside the native scope retain the packet path.
 Mapped routes, relays, and WSS also retain the packet path.
-The H2 server cannot initiate native request streams.
+H2 and H3 servers cannot initiate native HTTP request streams.
 In `auto`, that direction uses packets.
 In `on`, an eligible native open from the server side returns an error.
 
@@ -94,7 +100,11 @@ Destination and policy failures do not reduce native transport health.
 H2 streams share one TCP carrier.
 A lost outer TCP segment can delay all streams.
 The automatic policy does not repair that carrier by selecting packets on the same connection.
-QUIC continues to use its native stream and datagram facilities.
+QUIC uses its native stream and datagram facilities.
+Its automatic policy has the same admission and no-replay boundaries.
+Packet fallback still needs packet-stack resources.
+It does not repair a failed QUIC connection.
+WSS retains packet forwarding and has no native TCP proxy mode.
 
 ## What does not
 
@@ -115,3 +125,4 @@ lowertier does not log request payloads or full request targets.
 
 - [Userspace proxy internals](design/userspace-proxy.md): name resolution, dialing, buffers, and native stream admission.
 - [H2 stream cost model](design/h2-native-proxy.md): overhead, flow control, and automatic policy.
+- [QUIC admission policy](design/quic-proxy-policy.md): safe fallback, cooldown, and WSS limits.

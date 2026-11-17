@@ -526,6 +526,14 @@ pub static OPTIONS: &[OptionSpec] = &[
         "Native H2 TCP proxy streams. off uses packets; on requires streams in the supported scope; auto permits safe fallback. Applies to new flows.",
     ),
     opt(
+        "transport.quic.tcp_proxy",
+        Enum(&["off", "on", "auto"]),
+        To("flags.quic_tcp_proxy"),
+        Live,
+        "auto",
+        "Native QUIC TCP proxy streams. off uses packets; on requires streams in the supported scope; auto permits safe fallback and admission cooldown. Applies to new flows.",
+    ),
+    opt(
         "transport.quic.initial_receive_window",
         Bytes,
         To("flags.quic_initial_receive_window"),
@@ -1953,20 +1961,46 @@ mod tests {
     }
 
     #[test]
-    fn h2_proxy_modes_round_trip_and_reject_unknown_values() {
+    fn proxy_modes_round_trip_and_reject_unknown_values() {
         use crate::common::config::{ConfigLoader as _, TomlConfigLoader};
-        for mode in ["off", "on", "auto"] {
-            let config = TomlConfigLoader::new_from_str(
-                &format!("[transport.h2]\ntcp_proxy = \"{mode}\"\n")
-            ).unwrap();
-            assert_eq!(config.get_flags().h2_tcp_proxy, mode);
-            let restored = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
-            assert_eq!(restored.get_flags().h2_tcp_proxy, mode);
+        for protocol in ["h2", "quic"] {
+            for mode in ["off", "on", "auto"] {
+                let config = TomlConfigLoader::new_from_str(&format!(
+                    "[transport.{protocol}]\ntcp_proxy = \"{mode}\"\n"
+                ))
+                .unwrap();
+                let restored = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+                for flags in [config.get_flags(), restored.get_flags()] {
+                    assert_eq!(
+                        if protocol == "h2" {
+                            flags.h2_tcp_proxy
+                        } else {
+                            flags.quic_tcp_proxy
+                        },
+                        mode
+                    );
+                }
+            }
+            assert!(
+                TomlConfigLoader::new_from_str(&format!(
+                    "[transport.{protocol}]\ntcp_proxy = \"unknown\"\n"
+                ))
+                .is_err()
+            );
+            assert_eq!(
+                lookup(&format!("transport.{protocol}.tcp_proxy"))
+                    .unwrap()
+                    .apply,
+                Live
+            );
         }
-        assert!(TomlConfigLoader::new_from_str(
-            "[transport.h2]\ntcp_proxy = \"unknown\"\n"
-        ).is_err());
-        assert_eq!(lookup("transport.h2.tcp_proxy").unwrap().apply, Live);
+        assert_eq!(
+            TomlConfigLoader::new_from_str("")
+                .unwrap()
+                .get_flags()
+                .quic_tcp_proxy,
+            "auto"
+        );
     }
 
     #[test]

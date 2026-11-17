@@ -94,6 +94,7 @@ Secrets are redacted in all output.
 | `transport.listen` | list of strings |  | instance restart | Listener URLs, for example quic://0.0.0.0:11012. |
 | `transport.advertise` | list of strings |  | instance restart | Public listener URLs announced to peers, for port mappings. |
 | `transport.h2.tcp_proxy` | `off` \| `on` \| `auto` | `off` | live | Native H2 TCP proxy streams. off uses packets; on requires streams in the supported scope; auto permits safe fallback. Applies to new flows. |
+| `transport.quic.tcp_proxy` | `off` \| `on` \| `auto` | `auto` | live | Native QUIC TCP proxy streams. off uses packets; on requires streams in the supported scope; auto permits safe fallback and admission cooldown. Applies to new flows. |
 | `transport.quic.initial_receive_window` | size | `2MiB` | instance restart | Initial QUIC stream receive window. |
 | `transport.quic.receive_window` | size | `4MiB` | instance restart | Maximum QUIC connection receive window. |
 

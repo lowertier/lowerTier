@@ -192,18 +192,21 @@ impl ProxyEndpoint {
         })
     }
     fn mode(&self) -> io::Result<&str> {
-        if self.h2_budget.is_none() {
-            return Ok("on");
-        }
+        let flags = self.context()?.flags_arc();
+        let configured = if self.h2_budget.is_some() {
+            flags.h2_tcp_proxy.as_str()
+        } else {
+            flags.quic_tcp_proxy.as_str()
+        };
         // Return stable literals; configuration snapshots can change between flows.
-        Ok(match self.context()?.flags_arc().h2_tcp_proxy.as_str() {
+        Ok(match configured {
             "on" => "on",
             "auto" => "auto",
             _ => "off",
         })
     }
     pub(crate) fn requires_capability(&self) -> bool {
-        self.h2_budget.is_some() && matches!(self.mode(), Ok("on"))
+        matches!(self.mode(), Ok("on"))
     }
     fn decision(&self, selected: &str, reason: &str) {
         tracing::debug!(
@@ -282,13 +285,13 @@ impl ProxyEndpoint {
             if self.requires_capability() {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    "native HTTP/2 streams require the client side of the connection",
+                    "native proxy streams require the client side of the connection",
                 ));
             }
             self.decision("packet", "native_initiator_unavailable");
             return Ok(None);
         };
-        let mut attempt = if self.h2_budget.is_some() && mode == "auto" {
+        let mut attempt = if mode == "auto" {
             let generation = self.auto.lock().unwrap().admit(Instant::now());
             let Some(generation) = generation else {
                 self.decision("packet", "native_cooldown");
@@ -359,7 +362,7 @@ impl ProxyEndpoint {
             if let Some(attempt) = &mut attempt {
                 attempt.failed();
             }
-            if mode == "auto" || self.h2_budget.is_none() {
+            if mode == "auto" {
                 self.decision("packet", "native_refused_before_admission");
                 return Ok(None);
             }
@@ -651,6 +654,8 @@ impl ProxyStream {
         I: AsyncRead + AsyncWrite + Unpin + Send + 'a,
     {
         Box::pin(async move {
+            // Retain admission when the future captures individual stream fields.
+            let permit = self._permit;
             futures::future::poll_fn(|cx| self.write.get_mut().unwrap().poll_pending(cx)).await?;
             let mut send = self.write.get_mut().unwrap().send.take().unwrap();
             let (mut read, mut write) = tokio::io::split(inbound);
@@ -696,7 +701,9 @@ impl ProxyStream {
                         .add(data.len() as u64);
                 }
             };
-            tokio::try_join!(upload, download)
+            let result = tokio::try_join!(upload, download);
+            drop(permit);
+            result
         })
     }
 }
@@ -819,6 +826,232 @@ mod tests {
         client.bind_context(client_context);
         server.bind_context(server_context);
         (client, server, client_tunnel, server_tunnel)
+    }
+
+    async fn quic_pair() -> (
+        Arc<ProxyEndpoint>,
+        Arc<ProxyEndpoint>,
+        Box<dyn crate::tunnel::Tunnel>,
+        Box<dyn crate::tunnel::Tunnel>,
+    ) {
+        let mut listener =
+            QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), get_mock_global_ctx());
+        listener.listen().await.unwrap();
+        let accepted_url = listener.local_url();
+        let accepted = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let client_tunnel = QuicTunnelConnector::new(accepted_url, get_mock_global_ctx())
+            .connect()
+            .await
+            .unwrap();
+        let server_tunnel = accepted.await.unwrap();
+        let client = client_tunnel.tcp_proxy().unwrap();
+        let server = server_tunnel.tcp_proxy().unwrap();
+        client.authenticated(true);
+        server.authenticated(true);
+        (client, server, client_tunnel, server_tunnel)
+    }
+
+    #[tokio::test]
+    async fn quic_auto_refusal_cooldown_recovery_and_live_mode() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (client, server, _client_tunnel, _server_tunnel) = quic_pair().await;
+            let source = "192.0.2.1:40000".parse().unwrap();
+            let destination = "192.0.2.2:8080".parse().unwrap();
+            assert_eq!(client.mode().unwrap(), "auto");
+            let mut flags = server.context().unwrap().config.get_flags();
+            flags.quic_tcp_proxy = "off".into();
+            server.context().unwrap().set_flags(flags);
+            let mut flags = client.context().unwrap().config.get_flags();
+            flags.quic_tcp_proxy = "on".into();
+            client.context().unwrap().set_flags(flags);
+            assert!(client.connect(source, destination).await.is_err());
+            let mut flags = client.context().unwrap().config.get_flags();
+            flags.quic_tcp_proxy = "auto".into();
+            client.context().unwrap().set_flags(flags);
+            assert!(client.connect(source, destination).await.unwrap().is_none());
+            assert!(client.auto.lock().unwrap().retry_at.is_some());
+            assert!(client.connect(source, destination).await.unwrap().is_none());
+            let mut flags = server.context().unwrap().config.get_flags();
+            flags.quic_tcp_proxy = "auto".into();
+            server.context().unwrap().set_flags(flags);
+            client.auto.lock().unwrap().retry_at = Some(Instant::now());
+            let mut incoming = server.take_incoming().unwrap();
+            let remote = tokio::spawn(async move {
+                let mut stream = incoming.recv().await.unwrap().accept().await.unwrap();
+                let mut data = Vec::new();
+                stream.read_to_end(&mut data).await.unwrap();
+                assert_eq!(data, b"request");
+                stream.write_all(b"reply").await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let mut stream = client.connect(source, destination).await.unwrap().unwrap();
+            assert!(client.auto.lock().unwrap().retry_at.is_none());
+            let mut flags = client.context().unwrap().config.get_flags();
+            flags.quic_tcp_proxy = "off".into();
+            client.context().unwrap().set_flags(flags);
+            assert!(client.connect(source, destination).await.unwrap().is_none());
+            stream.write_all(b"request").await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).await.unwrap();
+            assert_eq!(reply, b"reply");
+            remote.await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn quic_auto_capacity_and_ambiguous_admission_boundaries() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (client, server, _client_tunnel, _server_tunnel) = quic_pair().await;
+            let source = "192.0.2.1:40000".parse().unwrap();
+            let destination = "192.0.2.2:8080".parse().unwrap();
+            let permits: Vec<_> = (0..MAX_STREAMS)
+                .map(|_| client.reserve().unwrap())
+                .collect();
+            assert!(client.connect(source, destination).await.unwrap().is_none());
+            assert!(client.auto.lock().unwrap().retry_at.is_none());
+            let mut flags = client.context().unwrap().config.get_flags();
+            flags.quic_tcp_proxy = "on".into();
+            client.context().unwrap().set_flags(flags);
+            assert!(client.connect(source, destination).await.is_err());
+            drop(permits);
+            let mut flags = client.context().unwrap().config.get_flags();
+            flags.quic_tcp_proxy = "auto".into();
+            client.context().unwrap().set_flags(flags);
+            let mut incoming = server.take_incoming().unwrap();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let remote = tokio::spawn(async move {
+                let pending = incoming.recv().await.unwrap();
+                released.await.unwrap();
+                drop(pending);
+                incoming
+                    .recv()
+                    .await
+                    .unwrap()
+                    .reject(http::StatusCode::FORBIDDEN)
+                    .await
+                    .unwrap();
+                incoming
+                    .recv()
+                    .await
+                    .unwrap()
+                    .reject(http::StatusCode::SERVICE_UNAVAILABLE)
+                    .await
+                    .unwrap();
+            });
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(50),
+                    client.connect(source, destination)
+                )
+                .await
+                .is_err()
+            );
+            assert!(client.auto.lock().unwrap().retry_at.is_some());
+            assert!(client.connect(source, destination).await.unwrap().is_none());
+            release.send(()).unwrap();
+            client.auto.lock().unwrap().retry_at = Some(Instant::now());
+            assert!(client.connect(source, destination).await.is_err());
+            assert!(client.auto.lock().unwrap().retry_at.is_none());
+            assert!(client.connect(source, destination).await.unwrap().is_none());
+            assert!(client.auto.lock().unwrap().retry_at.is_some());
+            remote.await.unwrap();
+            assert_eq!(client.slots.available_permits(), MAX_STREAMS);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_copy_retains_admission_until_completion_or_cancellation() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (client, server, _client_tunnel, _server_tunnel) = quic_pair().await;
+            let mut incoming = server.take_incoming().unwrap();
+            let remote =
+                tokio::spawn(async move { incoming.recv().await.unwrap().accept().await.unwrap() });
+            let mut stream = client
+                .connect(
+                    "192.0.2.1:40000".parse().unwrap(),
+                    "192.0.2.2:8080".parse().unwrap(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let _remote = remote.await.unwrap();
+            let governor = Arc::new(
+                crate::common::global_ctx::ProcessMemoryGovernor::with_limit(COPY_BYTES * 2),
+            );
+            stream._permit._memory = governor.try_reserve_owned(COPY_BYTES * 2).unwrap();
+            assert_eq!(client.slots.available_permits(), MAX_STREAMS - 1);
+            let (mut inbound, _application) = tokio::io::duplex(64);
+            let mut transfer = stream.copy_owned(&mut inbound);
+            assert_eq!(client.slots.available_permits(), MAX_STREAMS - 1);
+            assert!(governor.try_reserve_owned(1).is_none());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), transfer.as_mut())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(client.slots.available_permits(), MAX_STREAMS - 1);
+            assert!(governor.try_reserve_owned(1).is_none());
+            drop(transfer);
+            assert_eq!(client.slots.available_permits(), MAX_STREAMS);
+            assert!(governor.try_reserve_owned(COPY_BYTES * 2).is_some());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_copy_retains_admission_after_upload_fin() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (client, server, _client_tunnel, _server_tunnel) = quic_pair().await;
+            let mut incoming = server.take_incoming().unwrap();
+            let (uploaded, upload_done) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let remote = tokio::spawn(async move {
+                let mut stream = incoming.recv().await.unwrap().accept().await.unwrap();
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).await.unwrap();
+                assert_eq!(request, b"request");
+                uploaded.send(()).unwrap();
+                released.await.unwrap();
+                stream.write_all(b"reply").await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let mut stream = client
+                .connect(
+                    "192.0.2.1:40000".parse().unwrap(),
+                    "192.0.2.2:8080".parse().unwrap(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let governor = Arc::new(
+                crate::common::global_ctx::ProcessMemoryGovernor::with_limit(COPY_BYTES * 2),
+            );
+            stream._permit._memory = governor.try_reserve_owned(COPY_BYTES * 2).unwrap();
+            let (mut inbound, mut application) = tokio::io::duplex(64);
+            let transfer = tokio::spawn(async move { stream.copy_owned(&mut inbound).await });
+            application.write_all(b"request").await.unwrap();
+            application.shutdown().await.unwrap();
+            upload_done.await.unwrap();
+            assert!(!transfer.is_finished());
+            assert_eq!(client.slots.available_permits(), MAX_STREAMS - 1);
+            assert!(governor.try_reserve_owned(1).is_none());
+            release.send(()).unwrap();
+            let mut reply = Vec::new();
+            application.read_to_end(&mut reply).await.unwrap();
+            assert_eq!(reply, b"reply");
+            assert_eq!(transfer.await.unwrap().unwrap(), (7, 5));
+            remote.await.unwrap();
+            assert_eq!(client.slots.available_permits(), MAX_STREAMS);
+            assert!(governor.try_reserve_owned(COPY_BYTES * 2).is_some());
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

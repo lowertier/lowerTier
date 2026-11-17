@@ -157,6 +157,8 @@ message FlagsInConfig {
   uint32 threads = 82;
   // Select native HTTP/2 TCP proxy streams: off, on, or auto.
   string h2_tcp_proxy = 83;
+  // Select native QUIC TCP proxy streams: off, on, or auto.
+  string quic_tcp_proxy = 84;
 }
 
 enum RelayPolicy { hop = 0; latency = 1; goodput = 2; }

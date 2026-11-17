@@ -5,7 +5,7 @@ The implementation shares destination admission and byte copying with the H3 pro
 It adds no smux layer, retry protocol, or carrier pool.
 The public option is `transport.h2.tcp_proxy = "off" | "on" | "auto"`.
 The default is `off`.
-The [proxy guide](../proxy-mode.md#h2-tcp-streams) defines the modes.
+The [proxy guide](../proxy-mode.md#native-tcp-streams) defines the modes.
 
 ## Admission and failure boundaries
 
@@ -124,4 +124,5 @@ A broken carrier can terminate every stream.
 Automatic packet selection on that carrier cannot repair either condition.
 
 QUIC already provides independent reliable streams and datagrams.
-This implementation preserves the existing H3 path and adds no second multiplexer to QUIC.
+The [QUIC admission policy](quic-proxy-policy.md) uses the same automatic health state.
+It adds no second multiplexer to QUIC.

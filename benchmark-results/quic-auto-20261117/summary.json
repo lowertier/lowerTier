@@ -1,0 +1,3675 @@
+{
+  "verified_at": "2026-11-17T04:51:57.569948+00:00",
+  "pair": "jpaws-la",
+  "tun": "userspace",
+  "configured_overlay_mtu": 1300,
+  "effective_userspace_tcp_mtu": 1280,
+  "loss_probability_per_direction": 0.01,
+  "relay_receive_buffer_requested": 7340032,
+  "relay_receive_buffer_reported": [
+    8388608
+  ],
+  "repeats": 3,
+  "healthy_bytes_per_trial": 67108864,
+  "impaired_bytes_per_trial": 16777216,
+  "policy": {
+    "option": "transport.quic.tcp_proxy",
+    "modes": [
+      "off",
+      "on",
+      "auto"
+    ],
+    "default": "auto",
+    "fleet_h2_mode": "auto",
+    "native_scope": "Direct TCP proxy flows to the remote userspace peer's own IPv4 address. The local node initiates the carrier.",
+    "additional_multiplexer": false,
+    "added_payload_framing_bytes": 0,
+    "healthy_admission_health_locks": 2,
+    "copy_storage_charge_per_stream_bytes": 65536,
+    "native_streams_per_endpoint": 32,
+    "slow_reader_isolation_established": false,
+    "admitted_stream_replay": false
+  },
+  "validation": {
+    "library-tests-final": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T04:20:30.003228+00:00"
+    },
+    "focused-lifetime-completion": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T03:19:03.439459+00:00"
+    },
+    "caddy-tests-fixed": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T03:13:28.039082+00:00"
+    },
+    "check-full-ffi": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T03:11:20.578423+00:00"
+    },
+    "check-minimal": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T03:13:23.042786+00:00"
+    },
+    "tracker-bootstrap": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T03:16:00.500074+00:00"
+    },
+    "build-x86-fixed": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T02:57:23.546252+00:00"
+    },
+    "build-arm-fixed": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T03:04:58.556288+00:00"
+    },
+    "build-native-fixed": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T03:01:09.523388+00:00"
+    },
+    "format-changed": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T03:23:40.337077+00:00"
+    },
+    "verify-late-udp-collector": {
+      "exit_code": 0,
+      "timeout": false,
+      "finished_at": "2026-11-17T04:16:17.410854+00:00"
+    }
+  },
+  "library_tests_passed": 569,
+  "focused_stream_tests_passed": 13,
+  "caddy_tests_passed": 2,
+  "excluded_public_probe_tests": 2,
+  "tracker_bootstrap_delivered_bytes": 4194304,
+  "healthy_quic": [
+    {
+      "mode": "auto",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 106.58264312081623,
+        "minimum": 106.24066096507664,
+        "maximum": 111.67493615979501
+      },
+      "transfer_seconds": {
+        "median": 5.037132653873414,
+        "minimum": 4.807443195953965,
+        "maximum": 5.053346874192357
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 4.936009645462035,
+        "minimum": 4.805624485015869,
+        "maximum": 4.954636096954346
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 112.28439817205071,
+        "minimum": 106.32007522508502,
+        "maximum": 112.39320505410433
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 119.34332647360861,
+        "minimum": 114.54397104680537,
+        "maximum": 120.75534891337156
+      },
+      "loaded_rtt_samples": 129,
+      "mixed_udp_sent": 121,
+      "mixed_udp_received": 121,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 27848,
+      "jpaws_rss_kib_max": 33500,
+      "la_rss_kib_min": 28232,
+      "la_rss_kib_max": 34168,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-auto-r0-f1-get",
+        "healthy-quic-auto-r1-f1-get",
+        "healthy-quic-auto-r2-f1-get"
+      ]
+    },
+    {
+      "mode": "auto",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 103.6059503886932,
+        "minimum": 100.37304957912094,
+        "maximum": 109.41012009465295
+      },
+      "transfer_seconds": {
+        "median": 5.181854034308344,
+        "minimum": 4.906958437990397,
+        "maximum": 5.3487556097097695
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 4.861503839492798,
+        "minimum": 4.842877388000487,
+        "maximum": 5.085021257400512
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 112.24693804979324,
+        "minimum": 106.37099482119083,
+        "maximum": 112.36562393605709
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 118.71231552213429,
+        "minimum": 113.03148344159126,
+        "maximum": 120.69268815685064
+      },
+      "loaded_rtt_samples": 136,
+      "mixed_udp_sent": 124,
+      "mixed_udp_received": 124,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 20304,
+      "jpaws_rss_kib_max": 35512,
+      "la_rss_kib_min": 31252,
+      "la_rss_kib_max": 34904,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-auto-r0-f1-put",
+        "healthy-quic-auto-r1-f1-put",
+        "healthy-quic-auto-r2-f1-put"
+      ]
+    },
+    {
+      "mode": "auto",
+      "flows": 4,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 144.64037180570836,
+        "minimum": 143.1349089707199,
+        "maximum": 150.97510291488018
+      },
+      "transfer_seconds": {
+        "median": 3.7117639100179076,
+        "minimum": 3.5560228251852095,
+        "maximum": 3.7508034612983465
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 4.842877388000487,
+        "minimum": 4.78699803352356,
+        "maximum": 5.140900611877442
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 112.22099512815475,
+        "minimum": 106.40300484374166,
+        "maximum": 112.41019330918789
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 119.6828777436167,
+        "minimum": 115.73860445059836,
+        "maximum": 155.32803945243342
+      },
+      "loaded_rtt_samples": 93,
+      "mixed_udp_sent": 104,
+      "mixed_udp_received": 104,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 17200,
+      "jpaws_rss_kib_max": 25460,
+      "la_rss_kib_min": 32564,
+      "la_rss_kib_max": 37964,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-auto-r0-f4-get",
+        "healthy-quic-auto-r1-f4-get",
+        "healthy-quic-auto-r2-f4-get"
+      ]
+    },
+    {
+      "mode": "auto",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 141.5972652038789,
+        "minimum": 141.19545949943426,
+        "maximum": 148.3284651556635
+      },
+      "transfer_seconds": {
+        "median": 3.791534470859915,
+        "minimum": 3.6194732510484755,
+        "maximum": 3.802324195858091
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 4.861503839492796,
+        "minimum": 4.73111867904663,
+        "maximum": 4.973262548446655
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 112.29627998545766,
+        "minimum": 106.39227880164981,
+        "maximum": 112.36874712631106
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 166.2265955703333,
+        "minimum": 159.56255383789534,
+        "maximum": 178.91751585993913
+      },
+      "loaded_rtt_samples": 87,
+      "mixed_udp_sent": 104,
+      "mixed_udp_received": 104,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 17584,
+      "jpaws_rss_kib_max": 29596,
+      "la_rss_kib_min": 35472,
+      "la_rss_kib_max": 39116,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-auto-r0-f4-put",
+        "healthy-quic-auto-r1-f4-put",
+        "healthy-quic-auto-r2-f4-put"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 110.21709716773009,
+        "minimum": 29.66317375180938,
+        "maximum": 119.29696123591411
+      },
+      "transfer_seconds": {
+        "median": 4.871031135786325,
+        "minimum": 4.500289918854833,
+        "maximum": 18.098903256002814
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 7.208436727523804,
+        "minimum": 7.096678018569945,
+        "maximum": 20.30283212661743
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 109.44408783689141,
+        "minimum": 108.14064601436257,
+        "maximum": 113.25719580054283
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 149.95631270576268,
+        "minimum": 112.6297816634178,
+        "maximum": 160.34205323085158
+      },
+      "loaded_rtt_samples": 242,
+      "mixed_udp_sent": 199,
+      "mixed_udp_received": 199,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 22784,
+      "jpaws_rss_kib_max": 40096,
+      "la_rss_kib_min": 28320,
+      "la_rss_kib_max": 45628,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-off-r0-f1-get",
+        "healthy-quic-off-r1-f1-get",
+        "healthy-quic-off-r2-f1-get"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 86.41689693919203,
+        "minimum": 86.34795317102949,
+        "maximum": 88.06120818952328
+      },
+      "transfer_seconds": {
+        "median": 6.212568733841181,
+        "minimum": 6.096565366722643,
+        "maximum": 6.21752910502255
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 6.50063157081604,
+        "minimum": 6.444752216339112,
+        "maximum": 6.668269634246826
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 109.29206013679504,
+        "minimum": 108.07044105604291,
+        "maximum": 113.29428711906075
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 120.45454625040293,
+        "minimum": 116.57938775606453,
+        "maximum": 126.11197959631681
+      },
+      "loaded_rtt_samples": 161,
+      "mixed_udp_sent": 145,
+      "mixed_udp_received": 145,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 22500,
+      "jpaws_rss_kib_max": 44176,
+      "la_rss_kib_min": 33252,
+      "la_rss_kib_max": 43816,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-off-r0-f1-put",
+        "healthy-quic-off-r1-f1-put",
+        "healthy-quic-off-r2-f1-put"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 4,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 133.04727149537314,
+        "minimum": 111.34831936897798,
+        "maximum": 142.8287808967765
+      },
+      "transfer_seconds": {
+        "median": 4.035189192276448,
+        "minimum": 3.7588426410220563,
+        "maximum": 4.821544815786183
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 6.463378667831421,
+        "minimum": 6.388872861862183,
+        "maximum": 10.728836059570309
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 109.33985468000174,
+        "minimum": 108.11318317428231,
+        "maximum": 113.26804896816611
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 149.09356636926532,
+        "minimum": 148.67483964189887,
+        "maximum": 194.62590292096138
+      },
+      "loaded_rtt_samples": 99,
+      "mixed_udp_sent": 112,
+      "mixed_udp_received": 112,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 22400,
+      "jpaws_rss_kib_max": 50164,
+      "la_rss_kib_min": 34036,
+      "la_rss_kib_max": 72032,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-off-r0-f4-get",
+        "healthy-quic-off-r1-f4-get",
+        "healthy-quic-off-r2-f4-get"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 65.8199343893685,
+        "minimum": 18.381223161754697,
+        "maximum": 68.9652272809881
+      },
+      "transfer_seconds": {
+        "median": 8.156661306042224,
+        "minimum": 7.784660954028368,
+        "maximum": 29.207572710234672
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 6.631016731262205,
+        "minimum": 6.202608346939089,
+        "maximum": 7.469207048416137
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 109.37773622572422,
+        "minimum": 108.16374607384205,
+        "maximum": 113.27909724786878
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 120.16878183931111,
+        "minimum": 119.05787894502282,
+        "maximum": 131.46153171546757
+      },
+      "loaded_rtt_samples": 386,
+      "mixed_udp_sent": 315,
+      "mixed_udp_received": 315,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 21412,
+      "jpaws_rss_kib_max": 60576,
+      "la_rss_kib_min": 35000,
+      "la_rss_kib_max": 60788,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-off-r0-f4-put",
+        "healthy-quic-off-r1-f4-put",
+        "healthy-quic-off-r2-f4-put"
+      ]
+    },
+    {
+      "mode": "on",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 109.53560998887102,
+        "minimum": 105.32849139114863,
+        "maximum": 110.69034410980636
+      },
+      "transfer_seconds": {
+        "median": 4.90133676212281,
+        "minimum": 4.850205465685576,
+        "maximum": 5.097110049799085
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 4.842877388000488,
+        "minimum": 4.842877388000487,
+        "maximum": 4.898756742477416
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 107.72052686661482,
+        "minimum": 106.95932200178504,
+        "maximum": 112.42492496967316
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 121.28030830062924,
+        "minimum": 120.40971028618513,
+        "maximum": 126.52664254419504
+      },
+      "loaded_rtt_samples": 129,
+      "mixed_udp_sent": 121,
+      "mixed_udp_received": 121,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 23752,
+      "jpaws_rss_kib_max": 30248,
+      "la_rss_kib_min": 28096,
+      "la_rss_kib_max": 35708,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-on-r0-f1-get",
+        "healthy-quic-on-r1-f1-get",
+        "healthy-quic-on-r2-f1-get"
+      ]
+    },
+    {
+      "mode": "on",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 104.24123968921185,
+        "minimum": 103.57652487214908,
+        "maximum": 108.10540282437515
+      },
+      "transfer_seconds": {
+        "median": 5.1502736690454185,
+        "minimum": 4.966180209070444,
+        "maximum": 5.183326170314103
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 4.880130290985106,
+        "minimum": 4.805624485015869,
+        "maximum": 5.122274160385132
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 107.68370516598225,
+        "minimum": 107.02422307804227,
+        "maximum": 112.4087180942297
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 111.94560509175062,
+        "minimum": 110.97253612242639,
+        "maximum": 117.00064986944199
+      },
+      "loaded_rtt_samples": 137,
+      "mixed_udp_sent": 124,
+      "mixed_udp_received": 124,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 16268,
+      "jpaws_rss_kib_max": 29932,
+      "la_rss_kib_min": 31152,
+      "la_rss_kib_max": 35776,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-on-r0-f1-put",
+        "healthy-quic-on-r1-f1-put",
+        "healthy-quic-on-r2-f1-put"
+      ]
+    },
+    {
+      "mode": "on",
+      "flows": 4,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 142.8717599510187,
+        "minimum": 140.79893897975379,
+        "maximum": 149.86601818504468
+      },
+      "transfer_seconds": {
+        "median": 3.7577118962071836,
+        "minimum": 3.582339202053845,
+        "maximum": 3.8130323700606823
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 4.861503839492798,
+        "minimum": 4.78699803352356,
+        "maximum": 5.066394805908202
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 107.7013979665935,
+        "minimum": 107.03297611325979,
+        "maximum": 112.39499226212502
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 126.73007347621024,
+        "minimum": 117.96719646081328,
+        "maximum": 169.61345074232668
+      },
+      "loaded_rtt_samples": 95,
+      "mixed_udp_sent": 103,
+      "mixed_udp_received": 103,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 16920,
+      "jpaws_rss_kib_max": 29260,
+      "la_rss_kib_min": 33028,
+      "la_rss_kib_max": 38004,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-on-r0-f4-get",
+        "healthy-quic-on-r1-f4-get",
+        "healthy-quic-on-r2-f4-get"
+      ]
+    },
+    {
+      "mode": "on",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 146.70857036511998,
+        "minimum": 142.21311507332805,
+        "maximum": 147.9109086531371
+      },
+      "transfer_seconds": {
+        "median": 3.6594379637390375,
+        "minimum": 3.629691122099757,
+        "maximum": 3.775115338154137
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 5.736947059631347,
+        "minimum": 5.718320608139036,
+        "maximum": 5.7555735111236555
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 107.681630179286,
+        "minimum": 107.04938415437937,
+        "maximum": 112.40228591486812
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 135.64900539349762,
+        "minimum": 131.8465294316411,
+        "maximum": 143.34847924765194
+      },
+      "loaded_rtt_samples": 91,
+      "mixed_udp_sent": 104,
+      "mixed_udp_received": 104,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 19872,
+      "jpaws_rss_kib_max": 28072,
+      "la_rss_kib_min": 35572,
+      "la_rss_kib_max": 38356,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "healthy-quic-on-r0-f4-put",
+        "healthy-quic-on-r1-f4-put",
+        "healthy-quic-on-r2-f4-put"
+      ]
+    }
+  ],
+  "loss_quic": [
+    {
+      "mode": "auto",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 50331648,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 43.894918966818956,
+        "minimum": 41.12236165863528,
+        "maximum": 45.202377502645916
+      },
+      "transfer_seconds": {
+        "median": 3.0577053371816874,
+        "minimum": 2.9692625789903104,
+        "maximum": 3.2638623509556055
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 7.599592208862305,
+        "minimum": 7.525086402893066,
+        "maximum": 7.674098014831543
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 113.75877726823092,
+        "minimum": 106.99594439938664,
+        "maximum": 130.97581919282675
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 217.4463764531538,
+        "minimum": 157.80681720934808,
+        "maximum": 218.91820649616406
+      },
+      "loaded_rtt_samples": 73,
+      "mixed_udp_sent": 78,
+      "mixed_udp_received": 74,
+      "mixed_udp_timeouts": 4,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 27976,
+      "jpaws_rss_kib_max": 33716,
+      "la_rss_kib_min": 27812,
+      "la_rss_kib_max": 33320,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "clean-loss-quic-auto-r0-f1-get",
+        "clean-loss-quic-auto-r1-f1-get",
+        "clean-loss-quic-auto-r2-f1-get"
+      ]
+    },
+    {
+      "mode": "auto",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 50331648,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 41.08035905795107,
+        "minimum": 40.953287054868156,
+        "maximum": 44.78903832721234
+      },
+      "transfer_seconds": {
+        "median": 3.267199486028403,
+        "minimum": 2.9966646530665457,
+        "maximum": 3.2773371236398816
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 10.803341865539549,
+        "minimum": 10.654330253601072,
+        "maximum": 11.175870895385742
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 111.32252868264914,
+        "minimum": 106.95626633241773,
+        "maximum": 113.7547641992569
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 142.8318344987929,
+        "minimum": 140.95698215533048,
+        "maximum": 145.1811129692942
+      },
+      "loaded_rtt_samples": 79,
+      "mixed_udp_sent": 83,
+      "mixed_udp_received": 81,
+      "mixed_udp_timeouts": 2,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 31404,
+      "jpaws_rss_kib_max": 36280,
+      "la_rss_kib_min": 30832,
+      "la_rss_kib_max": 33320,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "clean-loss-quic-auto-r0-f1-put",
+        "clean-loss-quic-auto-r1-f1-put",
+        "clean-loss-quic-auto-r2-f1-put"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 50331648,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 0.8697233927834894,
+        "minimum": 0.8566391743710158,
+        "maximum": 0.9405902623914122
+      },
+      "transfer_seconds": {
+        "median": 154.32231570826843,
+        "minimum": 142.69521317258477,
+        "maximum": 156.67941884463653
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 76.74098014831543,
+        "minimum": 76.59196853637694,
+        "maximum": 77.63504981994629
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 112.18637274578214,
+        "minimum": 109.58006512373686,
+        "maximum": 112.58831294253469
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 117.28628799319267,
+        "minimum": 114.82192501425743,
+        "maximum": 118.61328906379636
+      },
+      "loaded_rtt_samples": 3409,
+      "mixed_udp_sent": 2679,
+      "mixed_udp_received": 2624,
+      "mixed_udp_timeouts": 55,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 17716,
+      "jpaws_rss_kib_max": 29784,
+      "la_rss_kib_min": 28324,
+      "la_rss_kib_max": 32832,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "clean-loss-quic-off-r0-f1-get",
+        "clean-loss-quic-off-r1-f1-get",
+        "clean-loss-quic-off-r2-f1-get"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 50331648,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 0.9611337404700295,
+        "minimum": 0.8898942426001842,
+        "maximum": 0.9837831169919378
+      },
+      "transfer_seconds": {
+        "median": 139.64521517511457,
+        "minimum": 136.43020060192794,
+        "maximum": 150.8243581932038
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 75.47438144683836,
+        "minimum": 72.19612598419188,
+        "maximum": 77.78406143188475
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 112.17788700014353,
+        "minimum": 109.66272419318557,
+        "maximum": 113.58724115416408
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 118.45977986231446,
+        "minimum": 113.75051657669246,
+        "maximum": 118.96468829363582
+      },
+      "loaded_rtt_samples": 3254,
+      "mixed_udp_sent": 2540,
+      "mixed_udp_received": 2492,
+      "mixed_udp_timeouts": 48,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 13224,
+      "jpaws_rss_kib_max": 31524,
+      "la_rss_kib_min": 29552,
+      "la_rss_kib_max": 31672,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "clean-loss-quic-off-r0-f1-put",
+        "clean-loss-quic-off-r1-f1-put",
+        "clean-loss-quic-off-r2-f1-put"
+      ]
+    },
+    {
+      "mode": "on",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 50331648,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 43.54718192046575,
+        "minimum": 11.48865442011065,
+        "maximum": 46.23642878014975
+      },
+      "transfer_seconds": {
+        "median": 3.0821220129728317,
+        "minimum": 2.9028567201457918,
+        "maximum": 11.682632542680949
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 7.748603820800781,
+        "minimum": 7.450580596923827,
+        "maximum": 12.814998626708983
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 112.18592105433345,
+        "minimum": 109.25475275143981,
+        "maximum": 113.0183688364923
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 147.15301310643545,
+        "minimum": 142.5096648978069,
+        "maximum": 152.73896660655737
+      },
+      "loaded_rtt_samples": 144,
+      "mixed_udp_sent": 131,
+      "mixed_udp_received": 129,
+      "mixed_udp_timeouts": 2,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 24660,
+      "jpaws_rss_kib_max": 34248,
+      "la_rss_kib_min": 27940,
+      "la_rss_kib_max": 33864,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "clean-loss-quic-on-r0-f1-get",
+        "clean-loss-quic-on-r1-f1-get",
+        "clean-loss-quic-on-r2-f1-get"
+      ]
+    },
+    {
+      "mode": "on",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 50331648,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 43.234913912804195,
+        "minimum": 20.279021002109918,
+        "maximum": 46.14344529837989
+      },
+      "transfer_seconds": {
+        "median": 3.104382913094014,
+        "minimum": 2.908706255722791,
+        "maximum": 6.6185506680049
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 12.293457984924316,
+        "minimum": 10.72883605957031,
+        "maximum": 13.113021850585936
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 112.26348672062159,
+        "minimum": 109.27839018404484,
+        "maximum": 164.7552950307727
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 147.26501656696198,
+        "minimum": 136.0267948359251,
+        "maximum": 589.0939355129375
+      },
+      "loaded_rtt_samples": 82,
+      "mixed_udp_sent": 93,
+      "mixed_udp_received": 89,
+      "mixed_udp_timeouts": 4,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 20624,
+      "jpaws_rss_kib_max": 35928,
+      "la_rss_kib_min": 30528,
+      "la_rss_kib_max": 33992,
+      "tcp_retransmitted_bytes": null,
+      "labels": [
+        "clean-loss-quic-on-r0-f1-put",
+        "clean-loss-quic-on-r1-f1-put",
+        "clean-loss-quic-on-r2-f1-put"
+      ]
+    }
+  ],
+  "healthy_wss": [
+    {
+      "mode": "off",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 63.20552822066446,
+        "minimum": 58.57268738982558,
+        "maximum": 66.70749564511483
+      },
+      "transfer_seconds": {
+        "median": 8.494049921166152,
+        "minimum": 8.04813472321257,
+        "maximum": 9.165891747921705
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 6.277114152908325,
+        "minimum": 6.202608346939087,
+        "maximum": 6.51925802230835
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 108.12738630920649,
+        "minimum": 106.85418685898185,
+        "maximum": 116.9332847930491
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 245.09077570401132,
+        "minimum": 239.57579443231222,
+        "maximum": 266.4837216027081
+      },
+      "loaded_rtt_samples": 169,
+      "mixed_udp_sent": 182,
+      "mixed_udp_received": 182,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 26988,
+      "jpaws_rss_kib_max": 33640,
+      "la_rss_kib_min": 26728,
+      "la_rss_kib_max": 41912,
+      "tcp_retransmitted_bytes": [
+        0,
+        0,
+        0
+      ],
+      "labels": [
+        "probe-fixed-healthy-wss-off-r0-f1-get",
+        "probe-fixed-healthy-wss-off-r1-f1-get",
+        "probe-fixed-healthy-wss-off-r2-f1-get"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 39.39959340225763,
+        "minimum": 38.13789731559939,
+        "maximum": 43.42166584223095
+      },
+      "transfer_seconds": {
+        "median": 13.626305899117142,
+        "minimum": 12.364125180058181,
+        "maximum": 14.07709784200415
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 5.140900611877441,
+        "minimum": 4.842877388000487,
+        "maximum": 5.215406417846679
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 108.10078494250774,
+        "minimum": 106.75769904628396,
+        "maximum": 116.91944114863873
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 210.6644649291411,
+        "minimum": 181.59307073801753,
+        "maximum": 232.4613434495404
+      },
+      "loaded_rtt_samples": 321,
+      "mixed_udp_sent": 251,
+      "mixed_udp_received": 251,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_late_received": 0,
+      "jpaws_rss_kib_min": 11436,
+      "jpaws_rss_kib_max": 43432,
+      "la_rss_kib_min": 29028,
+      "la_rss_kib_max": 42228,
+      "tcp_retransmitted_bytes": [
+        219176,
+        305136,
+        16622
+      ],
+      "labels": [
+        "probe-fixed-healthy-wss-off-r0-f1-put",
+        "probe-fixed-healthy-wss-off-r1-f1-put",
+        "probe-fixed-healthy-wss-off-r2-f1-put"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 4,
+      "direction": "GET",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 76.26438368186895,
+        "minimum": 59.52187511061278,
+        "maximum": 79.31233352576533
+      },
+      "transfer_seconds": {
+        "median": 7.039602053817362,
+        "minimum": 6.7690722001716495,
+        "maximum": 9.019724445883185
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 6.668269634246826,
+        "minimum": 6.537884473800658,
+        "maximum": 6.835907697677611
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 108.08993270620704,
+        "minimum": 106.81715933606029,
+        "maximum": 116.89631408080459
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 250.44337480794638,
+        "minimum": 247.63068407773972,
+        "maximum": 324.30595308542024
+      },
+      "loaded_rtt_samples": 123,
+      "mixed_udp_sent": 159,
+      "mixed_udp_received": 157,
+      "mixed_udp_timeouts": 2,
+      "mixed_udp_late_received": 2,
+      "jpaws_rss_kib_min": 20264,
+      "jpaws_rss_kib_max": 37644,
+      "la_rss_kib_min": 29220,
+      "la_rss_kib_max": 63272,
+      "tcp_retransmitted_bytes": [
+        0,
+        0,
+        0
+      ],
+      "labels": [
+        "probe-fixed-healthy-wss-off-r0-f4-get",
+        "probe-fixed-healthy-wss-off-r1-f4-get",
+        "probe-fixed-healthy-wss-off-r2-f4-get"
+      ]
+    },
+    {
+      "mode": "off",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1,
+      "throughput_mbps": {
+        "median": 48.58211701431426,
+        "minimum": 17.74271263945314,
+        "maximum": 51.00373734842795
+      },
+      "transfer_seconds": {
+        "median": 11.050792863592505,
+        "minimum": 10.526109260041267,
+        "maximum": 30.258671428076923
+      },
+      "daemon_cpu_seconds_per_delivered_gbit": {
+        "median": 5.718320608139038,
+        "minimum": 5.196779966354371,
+        "maximum": 5.904585123062133
+      },
+      "unloaded_rtt_median_ms": {
+        "median": 108.07172302156687,
+        "minimum": 106.89076501876116,
+        "maximum": 116.8665960431099
+      },
+      "loaded_rtt_p95_ms": {
+        "median": 319.4141127169132,
+        "minimum": 183.34069196134806,
+        "maximum": 882.1269286796442
+      },
+      "loaded_rtt_samples": 230,
+      "mixed_udp_sent": 225,
+      "mixed_udp_received": 194,
+      "mixed_udp_timeouts": 31,
+      "mixed_udp_late_received": 31,
+      "jpaws_rss_kib_min": 15380,
+      "jpaws_rss_kib_max": 45544,
+      "la_rss_kib_min": 31188,
+      "la_rss_kib_max": 48012,
+      "tcp_retransmitted_bytes": [
+        198090,
+        50218,
+        41992
+      ],
+      "labels": [
+        "probe-fixed-healthy-wss-off-r0-f4-put",
+        "probe-fixed-healthy-wss-off-r1-f4-put",
+        "probe-fixed-healthy-wss-off-r2-f4-put"
+      ]
+    }
+  ],
+  "admission": [
+    {
+      "scenario": "capacity",
+      "mode": "auto",
+      "repeats": 3,
+      "requested": 36,
+      "succeeded": 36,
+      "completion_ms": {
+        "median": 435.61396980658174,
+        "minimum": 429.13961224257946,
+        "maximum": 455.08631505072117
+      },
+      "failure_ms": null,
+      "decisions": {
+        "native_capacity": 36
+      },
+      "held_streams": [
+        32,
+        32,
+        32
+      ],
+      "recovery_decisions": [
+        {
+          "eligible": 1
+        },
+        {
+          "eligible": 1
+        },
+        {
+          "eligible": 1
+        }
+      ],
+      "mixed_udp_sent": 0,
+      "mixed_udp_received": 0,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [],
+      "labels": [
+        "retained-capacity-quic-auto-r0",
+        "retained-capacity-quic-auto-r1",
+        "retained-capacity-quic-auto-r2"
+      ]
+    },
+    {
+      "scenario": "capacity",
+      "mode": "on",
+      "repeats": 3,
+      "requested": 36,
+      "succeeded": 0,
+      "completion_ms": null,
+      "failure_ms": {
+        "median": 0.25808834470808506,
+        "minimum": 0.22704526782035828,
+        "maximum": 0.4203431308269501
+      },
+      "decisions": {},
+      "held_streams": [
+        32,
+        32,
+        32
+      ],
+      "recovery_decisions": [
+        {
+          "eligible": 1
+        },
+        {
+          "eligible": 1
+        },
+        {
+          "eligible": 1
+        }
+      ],
+      "mixed_udp_sent": 0,
+      "mixed_udp_received": 0,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [],
+      "labels": [
+        "retained-capacity-quic-on-r0",
+        "retained-capacity-quic-on-r1",
+        "retained-capacity-quic-on-r2"
+      ]
+    },
+    {
+      "scenario": "healthy",
+      "mode": "auto",
+      "repeats": 3,
+      "requested": 36,
+      "succeeded": 36,
+      "completion_ms": {
+        "median": 224.2204393260181,
+        "minimum": 215.66930785775185,
+        "maximum": 233.4501752629876
+      },
+      "failure_ms": null,
+      "decisions": {
+        "eligible": 36
+      },
+      "held_streams": [
+        0,
+        0,
+        0
+      ],
+      "recovery_decisions": [
+        null,
+        null,
+        null
+      ],
+      "mixed_udp_sent": 0,
+      "mixed_udp_received": 0,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [],
+      "labels": [
+        "setup-healthy-quic-auto-r0",
+        "setup-healthy-quic-auto-r1",
+        "setup-healthy-quic-auto-r2"
+      ]
+    },
+    {
+      "scenario": "healthy",
+      "mode": "off",
+      "repeats": 3,
+      "requested": 36,
+      "succeeded": 36,
+      "completion_ms": {
+        "median": 445.3131954651326,
+        "minimum": 428.691859357059,
+        "maximum": 548.6468840390444
+      },
+      "failure_ms": null,
+      "decisions": {
+        "disabled": 36
+      },
+      "held_streams": [
+        0,
+        0,
+        0
+      ],
+      "recovery_decisions": [
+        null,
+        null,
+        null
+      ],
+      "mixed_udp_sent": 0,
+      "mixed_udp_received": 0,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [],
+      "labels": [
+        "setup-healthy-quic-off-r0",
+        "setup-healthy-quic-off-r1",
+        "setup-healthy-quic-off-r2"
+      ]
+    },
+    {
+      "scenario": "healthy",
+      "mode": "on",
+      "repeats": 3,
+      "requested": 36,
+      "succeeded": 36,
+      "completion_ms": {
+        "median": 220.47611931338906,
+        "minimum": 214.47207685559988,
+        "maximum": 417.0755879022181
+      },
+      "failure_ms": null,
+      "decisions": {
+        "eligible": 36
+      },
+      "held_streams": [
+        0,
+        0,
+        0
+      ],
+      "recovery_decisions": [
+        null,
+        null,
+        null
+      ],
+      "mixed_udp_sent": 0,
+      "mixed_udp_received": 0,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [],
+      "labels": [
+        "setup-healthy-quic-on-r0",
+        "setup-healthy-quic-on-r1",
+        "setup-healthy-quic-on-r2"
+      ]
+    },
+    {
+      "scenario": "refusal",
+      "mode": "auto",
+      "repeats": 3,
+      "requested": 36,
+      "succeeded": 36,
+      "completion_ms": {
+        "median": 459.2040600255132,
+        "minimum": 427.069494035095,
+        "maximum": 592.8096552379429
+      },
+      "failure_ms": null,
+      "decisions": {
+        "native_refused_before_admission": 6,
+        "native_cooldown": 30
+      },
+      "held_streams": [
+        0,
+        0,
+        0
+      ],
+      "recovery_decisions": [
+        {
+          "eligible": 1
+        },
+        {
+          "eligible": 1
+        },
+        {
+          "eligible": 1
+        }
+      ],
+      "mixed_udp_sent": 0,
+      "mixed_udp_received": 0,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [],
+      "labels": [
+        "refusal-quic-auto-r0",
+        "refusal-quic-auto-r1",
+        "refusal-quic-auto-r2"
+      ]
+    },
+    {
+      "scenario": "refusal",
+      "mode": "off",
+      "repeats": 3,
+      "requested": 36,
+      "succeeded": 36,
+      "completion_ms": {
+        "median": 434.41353598609567,
+        "minimum": 428.2093858346343,
+        "maximum": 441.1514759995043
+      },
+      "failure_ms": null,
+      "decisions": {
+        "disabled": 36
+      },
+      "held_streams": [
+        0,
+        0,
+        0
+      ],
+      "recovery_decisions": [
+        {
+          "disabled": 1
+        },
+        {
+          "disabled": 1
+        },
+        {
+          "disabled": 1
+        }
+      ],
+      "mixed_udp_sent": 0,
+      "mixed_udp_received": 0,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [],
+      "labels": [
+        "refusal-quic-off-r0",
+        "refusal-quic-off-r1",
+        "refusal-quic-off-r2"
+      ]
+    },
+    {
+      "scenario": "refusal",
+      "mode": "on",
+      "repeats": 3,
+      "requested": 36,
+      "succeeded": 0,
+      "completion_ms": null,
+      "failure_ms": {
+        "median": 111.76465987227857,
+        "minimum": 107.80483530834317,
+        "maximum": 115.85475690662861
+      },
+      "decisions": {},
+      "held_streams": [
+        0,
+        0,
+        0
+      ],
+      "recovery_decisions": [
+        {
+          "eligible": 1
+        },
+        {
+          "eligible": 1
+        },
+        {
+          "eligible": 1
+        }
+      ],
+      "mixed_udp_sent": 0,
+      "mixed_udp_received": 0,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [],
+      "labels": [
+        "refusal-quic-on-r0",
+        "refusal-quic-on-r1",
+        "refusal-quic-on-r2"
+      ]
+    },
+    {
+      "scenario": "slow",
+      "mode": "auto",
+      "repeats": 3,
+      "requested": 6,
+      "succeeded": 0,
+      "completion_ms": null,
+      "failure_ms": {
+        "median": 10001.622644020244,
+        "minimum": 10000.80702174455,
+        "maximum": 10009.848343208432
+      },
+      "decisions": {
+        "native_cooldown": 3
+      },
+      "held_streams": [
+        4,
+        4,
+        4
+      ],
+      "recovery_decisions": [
+        null,
+        null,
+        null
+      ],
+      "mixed_udp_sent": 173,
+      "mixed_udp_received": 43,
+      "mixed_udp_timeouts": 130,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [
+        65536
+      ],
+      "labels": [
+        "slow-quic-auto-r0",
+        "slow-quic-auto-r1",
+        "slow-quic-auto-r2"
+      ]
+    },
+    {
+      "scenario": "slow",
+      "mode": "off",
+      "repeats": 3,
+      "requested": 6,
+      "succeeded": 6,
+      "completion_ms": {
+        "median": 446.05215545743704,
+        "minimum": 432.0655558258295,
+        "maximum": 456.73248264938593
+      },
+      "failure_ms": null,
+      "decisions": {
+        "disabled": 6
+      },
+      "held_streams": [
+        4,
+        4,
+        4
+      ],
+      "recovery_decisions": [
+        null,
+        null,
+        null
+      ],
+      "mixed_udp_sent": 118,
+      "mixed_udp_received": 118,
+      "mixed_udp_timeouts": 0,
+      "mixed_udp_collector_errors": [],
+      "receiver_buffers_reported": [
+        65536
+      ],
+      "labels": [
+        "slow-quic-off-r0",
+        "slow-quic-off-r1",
+        "slow-quic-off-r2"
+      ]
+    },
+    {
+      "scenario": "slow",
+      "mode": "on",
+      "repeats": 3,
+      "requested": 6,
+      "succeeded": 0,
+      "completion_ms": null,
+      "failure_ms": {
+        "median": 10001.717033796012,
+        "minimum": 10001.655817963183,
+        "maximum": 10002.388060092926
+      },
+      "decisions": {},
+      "held_streams": [
+        4,
+        4,
+        4
+      ],
+      "recovery_decisions": [
+        null,
+        null,
+        null
+      ],
+      "mixed_udp_sent": 127,
+      "mixed_udp_received": 38,
+      "mixed_udp_timeouts": 88,
+      "mixed_udp_collector_errors": [
+        {
+          "label": "slow-quic-on-r1",
+          "error": ""
+        }
+      ],
+      "receiver_buffers_reported": [
+        65536
+      ],
+      "labels": [
+        "slow-quic-on-r0",
+        "slow-quic-on-r1",
+        "slow-quic-on-r2"
+      ]
+    }
+  ],
+  "relay": [
+    {
+      "mode": "off",
+      "repeat": 0,
+      "counts": {
+        "forwarded_up": 43999,
+        "forwarded_down": 44987,
+        "dropped_up": 450,
+        "dropped_down": 441,
+        "bytes_up": 20263312,
+        "bytes_down": 20307528,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    },
+    {
+      "mode": "on",
+      "repeat": 0,
+      "counts": {
+        "forwarded_up": 13819,
+        "forwarded_down": 14094,
+        "dropped_up": 140,
+        "dropped_down": 158,
+        "bytes_up": 17290451,
+        "bytes_down": 17302087,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    },
+    {
+      "mode": "auto",
+      "repeat": 0,
+      "counts": {
+        "forwarded_up": 13787,
+        "forwarded_down": 14003,
+        "dropped_up": 149,
+        "dropped_down": 149,
+        "bytes_up": 17286747,
+        "bytes_down": 17285712,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    },
+    {
+      "mode": "off",
+      "repeat": 1,
+      "counts": {
+        "forwarded_up": 44676,
+        "forwarded_down": 45389,
+        "dropped_up": 436,
+        "dropped_down": 460,
+        "bytes_up": 20305329,
+        "bytes_down": 20367205,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    },
+    {
+      "mode": "on",
+      "repeat": 1,
+      "counts": {
+        "forwarded_up": 13724,
+        "forwarded_down": 13962,
+        "dropped_up": 139,
+        "dropped_down": 158,
+        "bytes_up": 17282536,
+        "bytes_down": 17285397,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    },
+    {
+      "mode": "auto",
+      "repeat": 1,
+      "counts": {
+        "forwarded_up": 13788,
+        "forwarded_down": 13942,
+        "dropped_up": 136,
+        "dropped_down": 161,
+        "bytes_up": 17288120,
+        "bytes_down": 17282759,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    },
+    {
+      "mode": "off",
+      "repeat": 2,
+      "counts": {
+        "forwarded_up": 43986,
+        "forwarded_down": 44330,
+        "dropped_up": 429,
+        "dropped_down": 454,
+        "bytes_up": 20269807,
+        "bytes_down": 20297868,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    },
+    {
+      "mode": "on",
+      "repeat": 2,
+      "counts": {
+        "forwarded_up": 15034,
+        "forwarded_down": 13723,
+        "dropped_up": 156,
+        "dropped_down": 157,
+        "bytes_up": 17321012,
+        "bytes_down": 17283517,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    },
+    {
+      "mode": "auto",
+      "repeat": 2,
+      "counts": {
+        "forwarded_up": 13700,
+        "forwarded_down": 14047,
+        "dropped_up": 141,
+        "dropped_down": 157,
+        "bytes_up": 17281029,
+        "bytes_down": 17287733,
+        "receive_buffer_requested": 7340032,
+        "receive_buffer_reported": 8388608
+      }
+    }
+  ],
+  "socket_drop_evidence": [
+    {
+      "mode": "off",
+      "repeat": 0,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2458537,
+                "socket": "UNCONN 0      0                             0.0.0.0:46691        0.0.0.0:*     users:((\"candidate\",pid=2458537,fd=16))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 365807,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=365807,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 365746,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=365746,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2458537,
+                "socket": "UNCONN 0      0                             0.0.0.0:46691        0.0.0.0:*     users:((\"candidate\",pid=2458537,fd=16))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 365807,
+                "socket": "UNCONN 0      0                 0.0.0.0:48705      0.0.0.0:*    users:((\"candidate\",pid=365807,fd=15))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 365807,
+                "socket": "UNCONN 0      0                 0.0.0.0:41221      0.0.0.0:*    users:((\"candidate\",pid=365807,fd=16))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 365807,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=365807,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 365746,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=365746,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "on",
+      "repeat": 0,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2459183,
+                "socket": "UNCONN 0      0                             0.0.0.0:38562        0.0.0.0:*     users:((\"candidate\",pid=2459183,fd=17))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 366714,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=366714,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 366653,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=366653,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2459183,
+                "socket": "UNCONN 0      0                             0.0.0.0:38562        0.0.0.0:*     users:((\"candidate\",pid=2459183,fd=17))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 366714,
+                "socket": "UNCONN 0      0                 0.0.0.0:40761      0.0.0.0:*    users:((\"candidate\",pid=366714,fd=18))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 366714,
+                "socket": "UNCONN 0      0                 0.0.0.0:42391      0.0.0.0:*    users:((\"candidate\",pid=366714,fd=15))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 366714,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=366714,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 366653,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=366653,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "auto",
+      "repeat": 0,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2459562,
+                "socket": "UNCONN 0      0                             0.0.0.0:53891        0.0.0.0:*     users:((\"candidate\",pid=2459562,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 367455,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=367455,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 367392,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=367392,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2459562,
+                "socket": "UNCONN 0      0                             0.0.0.0:53891        0.0.0.0:*     users:((\"candidate\",pid=2459562,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 367455,
+                "socket": "UNCONN 0      0                 0.0.0.0:45674      0.0.0.0:*    users:((\"candidate\",pid=367455,fd=15))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 367455,
+                "socket": "UNCONN 0      0                 0.0.0.0:38369      0.0.0.0:*    users:((\"candidate\",pid=367455,fd=18))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 367455,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=367455,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 367392,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=367392,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "off",
+      "repeat": 1,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2460697,
+                "socket": "UNCONN 0      0                             0.0.0.0:45924        0.0.0.0:*     users:((\"candidate\",pid=2460697,fd=17))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 369614,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=369614,fd=18))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 369553,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=369553,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2460697,
+                "socket": "UNCONN 0      0                             0.0.0.0:45924        0.0.0.0:*     users:((\"candidate\",pid=2460697,fd=17))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 369614,
+                "socket": "UNCONN 0      0                 0.0.0.0:49048      0.0.0.0:*    users:((\"candidate\",pid=369614,fd=17))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 369614,
+                "socket": "UNCONN 0      0                 0.0.0.0:34176      0.0.0.0:*    users:((\"candidate\",pid=369614,fd=15))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 369614,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=369614,fd=18))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 369553,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=369553,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "on",
+      "repeat": 1,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2459958,
+                "socket": "UNCONN 0      0                             0.0.0.0:60810        0.0.0.0:*     users:((\"candidate\",pid=2459958,fd=16))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 368170,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=368170,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 368109,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=368109,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2459958,
+                "socket": "UNCONN 0      0                             0.0.0.0:60810        0.0.0.0:*     users:((\"candidate\",pid=2459958,fd=16))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 368170,
+                "socket": "UNCONN 0      0                 0.0.0.0:53474      0.0.0.0:*    users:((\"candidate\",pid=368170,fd=15))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 368170,
+                "socket": "UNCONN 0      0                 0.0.0.0:37364      0.0.0.0:*    users:((\"candidate\",pid=368170,fd=20))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 368170,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=368170,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 368109,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=368109,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "auto",
+      "repeat": 1,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2460327,
+                "socket": "UNCONN 0      0                             0.0.0.0:57466        0.0.0.0:*     users:((\"candidate\",pid=2460327,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 368890,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=368890,fd=18))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 368827,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=368827,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2460327,
+                "socket": "UNCONN 0      0                             0.0.0.0:57466        0.0.0.0:*     users:((\"candidate\",pid=2460327,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 368890,
+                "socket": "UNCONN 0      0                 0.0.0.0:54702      0.0.0.0:*    users:((\"candidate\",pid=368890,fd=17))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 368890,
+                "socket": "UNCONN 0      0                 0.0.0.0:47123      0.0.0.0:*    users:((\"candidate\",pid=368890,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 368890,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=368890,fd=18))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 368827,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=368827,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "off",
+      "repeat": 2,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2461697,
+                "socket": "UNCONN 0      0                             0.0.0.0:55015        0.0.0.0:*     users:((\"candidate\",pid=2461697,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 371224,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=371224,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 371163,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=371163,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2461697,
+                "socket": "UNCONN 0      0                             0.0.0.0:55015        0.0.0.0:*     users:((\"candidate\",pid=2461697,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 371224,
+                "socket": "UNCONN 0      0                 0.0.0.0:34142      0.0.0.0:*    users:((\"candidate\",pid=371224,fd=15))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 371224,
+                "socket": "UNCONN 0      0                 0.0.0.0:47891      0.0.0.0:*    users:((\"candidate\",pid=371224,fd=16))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 371224,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=371224,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 371163,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=371163,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "on",
+      "repeat": 2,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2462329,
+                "socket": "UNCONN 0      0                             0.0.0.0:38345        0.0.0.0:*     users:((\"candidate\",pid=2462329,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 372124,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=372124,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 372061,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=372061,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2462329,
+                "socket": "UNCONN 0      0                             0.0.0.0:38345        0.0.0.0:*     users:((\"candidate\",pid=2462329,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 372124,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=372124,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 372061,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=372061,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              },
+              {
+                "owner": "node",
+                "pid": 372124,
+                "socket": "UNCONN 0      0                 0.0.0.0:40173      0.0.0.0:*    users:((\"candidate\",pid=372124,fd=15))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 372124,
+                "socket": "UNCONN 0      0                 0.0.0.0:48415      0.0.0.0:*    users:((\"candidate\",pid=372124,fd=20))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "auto",
+      "repeat": 2,
+      "drops": {
+        "jpaws_node": 0,
+        "la_node": 0,
+        "la_relay": 0
+      },
+      "evidence": {
+        "before": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2461340,
+                "socket": "UNCONN 0      0                             0.0.0.0:47053        0.0.0.0:*     users:((\"candidate\",pid=2461340,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 370511,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=370511,fd=18))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 370448,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=370448,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        },
+        "after": {
+          "jpaws": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 2461340,
+                "socket": "UNCONN 0      0                             0.0.0.0:47053        0.0.0.0:*     users:((\"candidate\",pid=2461340,fd=18))                                ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              }
+            ]
+          },
+          "la": {
+            "sockets": [
+              {
+                "owner": "node",
+                "pid": 370511,
+                "socket": "UNCONN 0      0                 0.0.0.0:40709      0.0.0.0:*    users:((\"candidate\",pid=370511,fd=19))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 370511,
+                "socket": "UNCONN 0      0                 0.0.0.0:46306      0.0.0.0:*    users:((\"candidate\",pid=370511,fd=20))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "node",
+                "pid": 370511,
+                "socket": "UNCONN 0      0                 0.0.0.0:15490      0.0.0.0:*    users:((\"candidate\",pid=370511,fd=18))                               ",
+                "memory": "\t skmem:(r0,rb14680064,t0,tb14680064,f4096,w0,o0,bl0,d0)",
+                "drops": 0,
+                "receive_buffer_reported": 14680064
+              },
+              {
+                "owner": "relay",
+                "pid": 370448,
+                "socket": "UNCONN 0      0                 0.0.0.0:15491      0.0.0.0:*    users:((\"python3\",pid=370448,fd=3))                                  ",
+                "memory": "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d0)   ",
+                "drops": 0,
+                "receive_buffer_reported": 8388608
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "quic_connection_counters": [
+    {
+      "impaired": false,
+      "mode": "auto",
+      "repeat": 0,
+      "client": {
+        "connection": 5782505529360,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 105148,
+        "tx_bytes": 137851606,
+        "tx_ios": 17182,
+        "rx_datagrams": 102182,
+        "rx_bytes": 137695720,
+        "rx_ios": 102184,
+        "tx_frames": 151,
+        "rx_frames": 151,
+        "rtt_us": 112113,
+        "cwnd": 7250125,
+        "pacing_rate_bps": 442108888,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 105150,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 114259,
+        "datagram_queue_dequeued": 151,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 2213923405840,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 102181,
+        "tx_bytes": 137695624,
+        "tx_ios": 12484,
+        "rx_datagrams": 105142,
+        "rx_bytes": 137844406,
+        "rx_ios": 105144,
+        "tx_frames": 151,
+        "rx_frames": 151,
+        "rtt_us": 111889,
+        "cwnd": 7514417,
+        "pacing_rate_bps": 442221104,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 102183,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 101497,
+        "datagram_queue_dequeued": 151,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": false,
+      "mode": "auto",
+      "repeat": 1,
+      "client": {
+        "connection": 2960242253840,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 104874,
+        "tx_bytes": 137838430,
+        "tx_ios": 16814,
+        "rx_datagrams": 101686,
+        "rx_bytes": 137676700,
+        "rx_ios": 101688,
+        "tx_frames": 148,
+        "rx_frames": 148,
+        "rtt_us": 106158,
+        "cwnd": 7317358,
+        "pacing_rate_bps": 466978400,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 104876,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 262226,
+        "datagram_queue_dequeued": 148,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 4338992889872,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 101685,
+        "tx_bytes": 137676604,
+        "tx_ios": 12420,
+        "rx_datagrams": 104868,
+        "rx_bytes": 137831230,
+        "rx_ios": 104870,
+        "tx_frames": 148,
+        "rx_frames": 148,
+        "rtt_us": 105917,
+        "cwnd": 7445823,
+        "pacing_rate_bps": 467267264,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 101687,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 266304,
+        "datagram_queue_dequeued": 148,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": false,
+      "mode": "auto",
+      "repeat": 2,
+      "client": {
+        "connection": 3072213393424,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 105008,
+        "tx_bytes": 137858130,
+        "tx_ios": 17088,
+        "rx_datagrams": 101975,
+        "rx_bytes": 137688043,
+        "rx_ios": 101977,
+        "tx_frames": 154,
+        "rx_frames": 154,
+        "rtt_us": 111871,
+        "cwnd": 7410827,
+        "pacing_rate_bps": 442591376,
+        "in_flight": 0,
+        "congestion_events": 2,
+        "lost_packets": 9,
+        "lost_bytes": 13068,
+        "sent_packets": 105010,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 45001,
+        "datagram_queue_dequeued": 154,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 4186656555024,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 101974,
+        "tx_bytes": 137687947,
+        "tx_ios": 12769,
+        "rx_datagrams": 104993,
+        "rx_bytes": 137837862,
+        "rx_ios": 104995,
+        "tx_frames": 154,
+        "rx_frames": 154,
+        "rtt_us": 111723,
+        "cwnd": 7491331,
+        "pacing_rate_bps": 442740792,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 101976,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 135848,
+        "datagram_queue_dequeued": 154,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": false,
+      "mode": "off",
+      "repeat": 0,
+      "client": {
+        "connection": 5780123099152,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 128492,
+        "tx_bytes": 146744756,
+        "tx_ios": 40118,
+        "rx_datagrams": 120307,
+        "rx_bytes": 145284764,
+        "rx_ios": 120309,
+        "tx_frames": 131090,
+        "rx_frames": 124624,
+        "rtt_us": 112667,
+        "cwnd": 11459387,
+        "pacing_rate_bps": 497372664,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 128494,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 82991673,
+        "datagram_queue_dequeued": 131090,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 3527981744144,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 120306,
+        "tx_bytes": 145284668,
+        "tx_ios": 19876,
+        "rx_datagrams": 128486,
+        "rx_bytes": 146737556,
+        "rx_ios": 128488,
+        "tx_frames": 124624,
+        "rx_frames": 131090,
+        "rtt_us": 112473,
+        "cwnd": 21247277,
+        "pacing_rate_bps": 1483790736,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 120308,
+        "mtu": 1452,
+        "send_buffer_space": 741895,
+        "datagram_queue_sojourn_us": 56717518,
+        "datagram_queue_dequeued": 124624,
+        "datagram_queue_congestions": 3,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": false,
+      "mode": "off",
+      "repeat": 1,
+      "client": {
+        "connection": 5348780941328,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 127133,
+        "tx_bytes": 145801504,
+        "tx_ios": 39311,
+        "rx_datagrams": 120179,
+        "rx_bytes": 145013527,
+        "rx_ios": 120181,
+        "tx_frames": 130595,
+        "rx_frames": 120642,
+        "rtt_us": 108554,
+        "cwnd": 7992018,
+        "pacing_rate_bps": 345853080,
+        "in_flight": 0,
+        "congestion_events": 5,
+        "lost_packets": 19,
+        "lost_bytes": 23904,
+        "sent_packets": 127135,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 48839624,
+        "datagram_queue_dequeued": 130595,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 5607149879312,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 120178,
+        "tx_bytes": 145013431,
+        "tx_ios": 18811,
+        "rx_datagrams": 127108,
+        "rx_bytes": 145770358,
+        "rx_ios": 127110,
+        "tx_frames": 120642,
+        "rx_frames": 130577,
+        "rtt_us": 108517,
+        "cwnd": 12329658,
+        "pacing_rate_bps": 568938344,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 120180,
+        "mtu": 1452,
+        "send_buffer_space": 284469,
+        "datagram_queue_sojourn_us": 63717056,
+        "datagram_queue_dequeued": 120642,
+        "datagram_queue_congestions": 2,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": false,
+      "mode": "off",
+      "repeat": 2,
+      "client": {
+        "connection": 4042842382352,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 150500,
+        "tx_bytes": 147621522,
+        "tx_ios": 65667,
+        "rx_datagrams": 132064,
+        "rx_bytes": 146133844,
+        "rx_ios": 132066,
+        "tx_frames": 148416,
+        "rx_frames": 132986,
+        "rtt_us": 107419,
+        "cwnd": 14227807,
+        "pacing_rate_bps": 1013170608,
+        "in_flight": 172,
+        "congestion_events": 1,
+        "lost_packets": 1,
+        "lost_bytes": 1328,
+        "sent_packets": 150502,
+        "mtu": 1452,
+        "send_buffer_space": 506585,
+        "datagram_queue_sojourn_us": 45740600,
+        "datagram_queue_dequeued": 148416,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 5293148028944,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 132067,
+        "tx_bytes": 146133927,
+        "tx_ios": 67396,
+        "rx_datagrams": 150497,
+        "rx_bytes": 147615492,
+        "rx_ios": 150499,
+        "tx_frames": 132986,
+        "rx_frames": 148415,
+        "rtt_us": 107312,
+        "cwnd": 7596128,
+        "pacing_rate_bps": 354435840,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 132069,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 205451567,
+        "datagram_queue_dequeued": 132986,
+        "datagram_queue_congestions": 1,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": false,
+      "mode": "on",
+      "repeat": 0,
+      "client": {
+        "connection": 3724914204688,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 105782,
+        "tx_bytes": 137883092,
+        "tx_ios": 18291,
+        "rx_datagrams": 103230,
+        "rx_bytes": 137739242,
+        "rx_ios": 103232,
+        "tx_frames": 151,
+        "rx_frames": 151,
+        "rtt_us": 106581,
+        "cwnd": 4461483,
+        "pacing_rate_bps": 201641760,
+        "in_flight": 0,
+        "congestion_events": 2,
+        "lost_packets": 2,
+        "lost_bytes": 2904,
+        "sent_packets": 105784,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 203385,
+        "datagram_queue_dequeued": 151,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 4534849519632,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 103242,
+        "tx_bytes": 137756741,
+        "tx_ios": 14009,
+        "rx_datagrams": 105776,
+        "rx_bytes": 137875388,
+        "rx_ios": 105778,
+        "tx_frames": 151,
+        "rx_frames": 151,
+        "rtt_us": 106456,
+        "cwnd": 7477410,
+        "pacing_rate_bps": 464263936,
+        "in_flight": 0,
+        "congestion_events": 7,
+        "lost_packets": 13,
+        "lost_bytes": 17595,
+        "sent_packets": 103244,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 189084,
+        "datagram_queue_dequeued": 151,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": false,
+      "mode": "on",
+      "repeat": 1,
+      "client": {
+        "connection": 5890819235856,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 105440,
+        "tx_bytes": 137865555,
+        "tx_ios": 18213,
+        "rx_datagrams": 102917,
+        "rx_bytes": 137725715,
+        "rx_ios": 102919,
+        "tx_frames": 150,
+        "rx_frames": 150,
+        "rtt_us": 107224,
+        "cwnd": 4601446,
+        "pacing_rate_bps": 200333368,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 105442,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 190638,
+        "datagram_queue_dequeued": 150,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 3597473300496,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 102918,
+        "tx_bytes": 137725718,
+        "tx_ios": 13821,
+        "rx_datagrams": 105436,
+        "rx_bytes": 137858453,
+        "rx_ios": 105438,
+        "tx_frames": 150,
+        "rx_frames": 150,
+        "rtt_us": 107161,
+        "cwnd": 7503295,
+        "pacing_rate_bps": 461780160,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 102920,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 201181,
+        "datagram_queue_dequeued": 150,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": false,
+      "mode": "on",
+      "repeat": 2,
+      "client": {
+        "connection": 4073846743056,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 105495,
+        "tx_bytes": 137864857,
+        "tx_ios": 18848,
+        "rx_datagrams": 103064,
+        "rx_bytes": 137731466,
+        "rx_ios": 103066,
+        "tx_frames": 151,
+        "rx_frames": 151,
+        "rtt_us": 111955,
+        "cwnd": 4694365,
+        "pacing_rate_bps": 191824416,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 105497,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 128815,
+        "datagram_queue_dequeued": 151,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 4060322938896,
+        "remote": 18,
+        "migration_rejections": 0,
+        "tx_datagrams": 103063,
+        "tx_bytes": 137731370,
+        "tx_ios": 13837,
+        "rx_datagrams": 105493,
+        "rx_bytes": 137862457,
+        "rx_ios": 105495,
+        "tx_frames": 151,
+        "rx_frames": 151,
+        "rtt_us": 111889,
+        "cwnd": 7595690,
+        "pacing_rate_bps": 441901768,
+        "in_flight": 0,
+        "congestion_events": 0,
+        "lost_packets": 0,
+        "lost_bytes": 0,
+        "sent_packets": 103065,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 234289,
+        "datagram_queue_dequeued": 151,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "auto",
+      "repeat": 0,
+      "client": {
+        "connection": 5986046648336,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 13936,
+        "tx_bytes": 17468272,
+        "tx_ios": 3170,
+        "rx_datagrams": 13992,
+        "rx_bytes": 17284720,
+        "rx_ios": 13994,
+        "tx_frames": 54,
+        "rx_frames": 51,
+        "rtt_us": 112731,
+        "cwnd": 6239647,
+        "pacing_rate_bps": 399612400,
+        "in_flight": 0,
+        "congestion_events": 130,
+        "lost_packets": 158,
+        "lost_bytes": 179833,
+        "sent_packets": 13938,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 72264,
+        "datagram_queue_dequeued": 54,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 6206263541776,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 14139,
+        "tx_bytes": 17471588,
+        "tx_ios": 3117,
+        "rx_datagrams": 13769,
+        "rx_bytes": 17276217,
+        "rx_ios": 13771,
+        "tx_frames": 52,
+        "rx_frames": 52,
+        "rtt_us": 113026,
+        "cwnd": 6402955,
+        "pacing_rate_bps": 434362752,
+        "in_flight": 0,
+        "congestion_events": 129,
+        "lost_packets": 149,
+        "lost_bytes": 186259,
+        "sent_packets": 14141,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 37008,
+        "datagram_queue_dequeued": 52,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "auto",
+      "repeat": 1,
+      "client": {
+        "connection": 5668051296272,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 13916,
+        "tx_bytes": 17457332,
+        "tx_ios": 3177,
+        "rx_datagrams": 13935,
+        "rx_bytes": 17282463,
+        "rx_ios": 13937,
+        "tx_frames": 55,
+        "rx_frames": 54,
+        "rtt_us": 115943,
+        "cwnd": 5802929,
+        "pacing_rate_bps": 350135784,
+        "in_flight": 0,
+        "congestion_events": 117,
+        "lost_packets": 136,
+        "lost_bytes": 168612,
+        "sent_packets": 13918,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 78438,
+        "datagram_queue_dequeued": 55,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 2882530656272,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 14094,
+        "tx_bytes": 17478051,
+        "tx_ios": 3072,
+        "rx_datagrams": 13774,
+        "rx_bytes": 17280591,
+        "rx_ios": 13776,
+        "tx_frames": 54,
+        "rx_frames": 54,
+        "rtt_us": 115284,
+        "cwnd": 4726334,
+        "pacing_rate_bps": 307209776,
+        "in_flight": 0,
+        "congestion_events": 134,
+        "lost_packets": 161,
+        "lost_bytes": 194729,
+        "sent_packets": 14096,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 100222,
+        "datagram_queue_dequeued": 54,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "auto",
+      "repeat": 2,
+      "client": {
+        "connection": 4796944752656,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 13832,
+        "tx_bytes": 17464182,
+        "tx_ios": 3306,
+        "rx_datagrams": 14039,
+        "rx_bytes": 17287249,
+        "rx_ios": 14041,
+        "tx_frames": 52,
+        "rx_frames": 50,
+        "rtt_us": 106645,
+        "cwnd": 2978966,
+        "pacing_rate_bps": 132758808,
+        "in_flight": 0,
+        "congestion_events": 129,
+        "lost_packets": 140,
+        "lost_bytes": 183068,
+        "sent_packets": 13834,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 151488,
+        "datagram_queue_dequeued": 52,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 3676092907536,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 14196,
+        "tx_bytes": 17490880,
+        "tx_ios": 3212,
+        "rx_datagrams": 13690,
+        "rx_bytes": 17275966,
+        "rx_ios": 13692,
+        "tx_frames": 52,
+        "rx_frames": 52,
+        "rtt_us": 106699,
+        "cwnd": 5835144,
+        "pacing_rate_bps": 419310576,
+        "in_flight": 0,
+        "congestion_events": 139,
+        "lost_packets": 157,
+        "lost_bytes": 202966,
+        "sent_packets": 14198,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 157798,
+        "datagram_queue_dequeued": 52,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "off",
+      "repeat": 0,
+      "client": {
+        "connection": 3813665677328,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 44445,
+        "tx_bytes": 20449252,
+        "tx_ios": 34451,
+        "rx_datagrams": 44982,
+        "rx_bytes": 20307340,
+        "rx_ios": 44984,
+        "tx_frames": 33356,
+        "rx_frames": 33370,
+        "rtt_us": 108750,
+        "cwnd": 83679,
+        "pacing_rate_bps": 3198216,
+        "in_flight": 0,
+        "congestion_events": 315,
+        "lost_packets": 450,
+        "lost_bytes": 181527,
+        "sent_packets": 44447,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 20869906,
+        "datagram_queue_dequeued": 33356,
+        "datagram_queue_congestions": 16,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 2565808472080,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 45422,
+        "tx_bytes": 20514003,
+        "tx_ios": 35617,
+        "rx_datagrams": 43991,
+        "rx_bytes": 20258361,
+        "rx_ios": 43993,
+        "tx_frames": 33696,
+        "rx_frames": 33029,
+        "rtt_us": 108707,
+        "cwnd": 70344,
+        "pacing_rate_bps": 3190496,
+        "in_flight": 0,
+        "congestion_events": 308,
+        "lost_packets": 442,
+        "lost_bytes": 202521,
+        "sent_packets": 45424,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 21689821,
+        "datagram_queue_dequeued": 33696,
+        "datagram_queue_congestions": 21,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "off",
+      "repeat": 1,
+      "client": {
+        "connection": 5644630368272,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 45106,
+        "tx_bytes": 20510937,
+        "tx_ios": 34753,
+        "rx_datagrams": 45383,
+        "rx_bytes": 20366762,
+        "rx_ios": 45385,
+        "tx_frames": 33613,
+        "rx_frames": 33545,
+        "rtt_us": 107490,
+        "cwnd": 94287,
+        "pacing_rate_bps": 2917144,
+        "in_flight": 0,
+        "congestion_events": 314,
+        "lost_packets": 436,
+        "lost_bytes": 201797,
+        "sent_packets": 45108,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 15296191,
+        "datagram_queue_dequeued": 33613,
+        "datagram_queue_congestions": 11,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 6263674519568,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 45843,
+        "tx_bytes": 20586117,
+        "tx_ios": 35675,
+        "rx_datagrams": 44666,
+        "rx_bytes": 20297979,
+        "rx_ios": 44668,
+        "tx_frames": 33888,
+        "rx_frames": 33298,
+        "rtt_us": 107438,
+        "cwnd": 66441,
+        "pacing_rate_bps": 3071560,
+        "in_flight": 0,
+        "congestion_events": 329,
+        "lost_packets": 460,
+        "lost_bytes": 214940,
+        "sent_packets": 45845,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 13926636,
+        "datagram_queue_dequeued": 33888,
+        "datagram_queue_congestions": 12,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "off",
+      "repeat": 2,
+      "client": {
+        "connection": 4043446427664,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 44403,
+        "tx_bytes": 20466778,
+        "tx_ios": 34228,
+        "rx_datagrams": 44316,
+        "rx_bytes": 20296849,
+        "rx_ios": 44318,
+        "tx_frames": 33613,
+        "rx_frames": 33468,
+        "rtt_us": 112867,
+        "cwnd": 233448,
+        "pacing_rate_bps": 9748864,
+        "in_flight": 86,
+        "congestion_events": 320,
+        "lost_packets": 429,
+        "lost_bytes": 194199,
+        "sent_packets": 44405,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 18829124,
+        "datagram_queue_dequeued": 33613,
+        "datagram_queue_congestions": 16,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 3538484150288,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 44775,
+        "tx_bytes": 20528030,
+        "tx_ios": 34542,
+        "rx_datagrams": 43974,
+        "rx_bytes": 20262362,
+        "rx_ios": 43976,
+        "tx_frames": 33810,
+        "rx_frames": 33281,
+        "rtt_us": 112786,
+        "cwnd": 110228,
+        "pacing_rate_bps": 4939688,
+        "in_flight": 0,
+        "congestion_events": 329,
+        "lost_packets": 454,
+        "lost_bytes": 226483,
+        "sent_packets": 44777,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 19480849,
+        "datagram_queue_dequeued": 33810,
+        "datagram_queue_congestions": 23,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "on",
+      "repeat": 0,
+      "client": {
+        "connection": 3190023004176,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 15287,
+        "tx_bytes": 19367248,
+        "tx_ios": 3566,
+        "rx_datagrams": 14086,
+        "rx_bytes": 17301503,
+        "rx_ios": 14088,
+        "tx_frames": 64,
+        "rx_frames": 60,
+        "rtt_us": 165709,
+        "cwnd": 4335787,
+        "pacing_rate_bps": 243133328,
+        "in_flight": 0,
+        "congestion_events": 305,
+        "lost_packets": 1475,
+        "lost_bytes": 2076121,
+        "sent_packets": 15289,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 322194,
+        "datagram_queue_dequeued": 64,
+        "datagram_queue_congestions": 2,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 6570932322320,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 14246,
+        "tx_bytes": 17498255,
+        "tx_ios": 3305,
+        "rx_datagrams": 13810,
+        "rx_bytes": 17283142,
+        "rx_ios": 13812,
+        "tx_frames": 61,
+        "rx_frames": 61,
+        "rtt_us": 165791,
+        "cwnd": 6035902,
+        "pacing_rate_bps": 407604864,
+        "in_flight": 0,
+        "congestion_events": 135,
+        "lost_packets": 158,
+        "lost_bytes": 195548,
+        "sent_packets": 14248,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 168276,
+        "datagram_queue_dequeued": 61,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "on",
+      "repeat": 1,
+      "client": {
+        "connection": 2288281198608,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 13858,
+        "tx_bytes": 17456096,
+        "tx_ios": 3309,
+        "rx_datagrams": 13956,
+        "rx_bytes": 17285158,
+        "rx_ios": 13958,
+        "tx_frames": 57,
+        "rx_frames": 57,
+        "rtt_us": 109092,
+        "cwnd": 4453942,
+        "pacing_rate_bps": 129117656,
+        "in_flight": 31,
+        "congestion_events": 119,
+        "lost_packets": 139,
+        "lost_bytes": 172825,
+        "sent_packets": 13860,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 60105,
+        "datagram_queue_dequeued": 57,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 4103373799440,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 14114,
+        "tx_bytes": 17477222,
+        "tx_ios": 3144,
+        "rx_datagrams": 13716,
+        "rx_bytes": 17277564,
+        "rx_ios": 13718,
+        "tx_frames": 57,
+        "rx_frames": 57,
+        "rtt_us": 109153,
+        "cwnd": 5600526,
+        "pacing_rate_bps": 370930472,
+        "in_flight": 0,
+        "congestion_events": 130,
+        "lost_packets": 158,
+        "lost_bytes": 191181,
+        "sent_packets": 14116,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 144913,
+        "datagram_queue_dequeued": 57,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    },
+    {
+      "impaired": true,
+      "mode": "on",
+      "repeat": 2,
+      "client": {
+        "connection": 6461244579856,
+        "remote": 208,
+        "migration_rejections": 0,
+        "tx_datagrams": 15186,
+        "tx_bytes": 17503638,
+        "tx_ios": 4594,
+        "rx_datagrams": 13719,
+        "rx_bytes": 17283369,
+        "rx_ios": 13721,
+        "tx_frames": 103,
+        "rx_frames": 101,
+        "rtt_us": 111784,
+        "cwnd": 2996560,
+        "pacing_rate_bps": 96614472,
+        "in_flight": 0,
+        "congestion_events": 126,
+        "lost_packets": 156,
+        "lost_bytes": 181670,
+        "sent_packets": 15188,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 89755,
+        "datagram_queue_dequeued": 103,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      },
+      "server": {
+        "connection": 3509359558672,
+        "remote": 127,
+        "migration_rejections": 0,
+        "tx_datagrams": 13874,
+        "tx_bytes": 17483187,
+        "tx_ios": 4763,
+        "rx_datagrams": 15024,
+        "rx_bytes": 17313667,
+        "rx_ios": 15026,
+        "tx_frames": 102,
+        "rx_frames": 102,
+        "rtt_us": 112022,
+        "cwnd": 1097465,
+        "pacing_rate_bps": 46914448,
+        "in_flight": 0,
+        "congestion_events": 136,
+        "lost_packets": 157,
+        "lost_bytes": 199134,
+        "sent_packets": 13876,
+        "mtu": 1452,
+        "send_buffer_space": 278784,
+        "datagram_queue_sojourn_us": 388438,
+        "datagram_queue_dequeued": 102,
+        "datagram_queue_congestions": 0,
+        "datagram_queue_head_sojourn_us": 0
+      }
+    }
+  ],
+  "measurement_scope": [
+    "Throughput excludes SOCKS and carrier admission setup.",
+    "Short-flow completion includes SOCKS admission and application delivery.",
+    "Daemon CPU includes user and system CPU from both LowTier processes.",
+    "CPU excludes generators, destination service, relay, and unrelated kernel work.",
+    "Server CPU covers the control interval, including unloaded probes.",
+    "Client CPU starts immediately before bulk transfer.",
+    "RSS records samples every 100 ms and does not prove allocation peaks.",
+    "QUIC counters are latest periodic connection totals and include probes.",
+    "QUIC lost bytes are not retransmitted stream bytes.",
+    "Loss cohorts use the same userspace relay and remain separate from direct cohorts.",
+    "WSS uses its default single TCP lane."
+  ],
+  "raw_bulk": "benchmark-results/quic-auto-20261117/bulk.json",
+  "raw_admission": "benchmark-results/quic-auto-20261117/admission.json",
+  "raw_overflow_stress": "benchmark-results/quic-auto-20261117/overflow-stress.json",
+  "raw_diagnostics": "benchmark-results/quic-auto-20261117/diagnostics.json",
+  "raw_initial_wss": "benchmark-results/quic-auto-20261117/initial-wss.json",
+  "command_audit": "benchmark-results/.work/quic-auto-20261117/audit.jsonl"
+}

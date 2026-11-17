@@ -38,7 +38,8 @@ second TCP stack for that stream.
 This path applies when the local peer initiated the transport, the destination
 is the remote userspace peer's own IPv4 address, and neither endpoint has ACL
 rules enabled. ACL-controlled destinations, relayed or mapped routes, peers
-without the capability, and WSS retain the packet path. H2 also applies its configured mode.
+without the capability, and WSS retain the packet path.
+H2 and QUIC apply their configured TCP proxy modes.
 Enabling ACL rules
 stops an active direct stream so reconnecting uses the policy-aware packet path.
 
@@ -52,9 +53,10 @@ The inbound TCP proxy remains available for local services and the overlay GUI.
 TCP has three backends: an operating system socket, an authenticated native stream, and the userspace packet stack.
 The experimental OverlayStream backend and its runtime switch have been removed.
 Explicit refusals before destination admission can permit packet fallback.
-H2 `on` reports native capability and capacity failures.
+The `on` mode reports native capability and capacity failures.
 Connection errors and timeouts fail the current flow.
-See the [H2 cost model](h2-native-proxy.md) for automatic policy and receive credit reservations.
+See the [H2 cost model](h2-native-proxy.md) for receive credit reservations.
+See the [QUIC policy](quic-proxy-policy.md) for shared automatic admission and separate QUIC resource controls.
 
 Each packet-path userspace TCP socket starts with an 8 KiB receive buffer and an 8 KiB transmit buffer.
 Active buffers grow with measured application demand and TCP round-trip time.
