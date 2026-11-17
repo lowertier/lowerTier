@@ -118,6 +118,8 @@ proxy_methods! {
     issue_credential, "IssueCredential", IssueCredentialRequest, IssueCredentialResponse;
     revoke_credential, "RevokeCredential", RevokeCredentialRequest, RevokeCredentialResponse;
     create_join_code, "CreateJoinCode", CreateJoinCodeRequest, CreateJoinCodeResponse;
+    forget_machine, "ForgetMachine", ForgetMachineRequest, ForgetMachineResponse;
+    list_offline_machines, "ListOfflineMachines", ListOfflineMachinesRequest, ListOfflineMachinesResponse;
     list_port_forwards, "ListPortForwards", ListPortForwardsRequest, ListPortForwardsResponse;
     watch_changes, "WatchChanges", WatchChangesRequest, WatchChangesResponse;
     get_config, "GetConfig", GetConfigRequest, GetConfigResponse;

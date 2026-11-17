@@ -87,6 +87,23 @@ message ListPeersResponse {
   string next_page_token = 4;
 }
 
+// Saved display metadata. These records never provide routes or authentication.
+message OfflineMachine {
+  string id = 1;
+  bytes peer_key = 2;
+  api.instance.Route route = 3;
+  int64 last_seen_unix_ms = 4;
+  int64 offline_retention = 5;
+}
+message ForgetMachineRequest { RequestMeta meta = 1; string id = 2; }
+message ForgetMachineResponse { ApiError error = 1; }
+message ListOfflineMachinesRequest { RequestMeta meta = 1; Page page = 2; }
+message ListOfflineMachinesResponse {
+  ApiError error = 1;
+  repeated OfflineMachine machines = 2;
+  string next_page_token = 3;
+}
+
 message RouteSnapshot {
   string destination = 1;
   repeated uint32 path_peer_ids = 2;
@@ -266,6 +283,7 @@ message CreateJoinCodeRequest {
   repeated string groups = 6;
   // Tracker URLs written to [discovery].trackers on the new node.
   repeated string trackers = 7;
+  optional int64 offline_retention = 8;
 }
 message CreateJoinCodeResponse {
   ApiError error = 1;
@@ -274,6 +292,7 @@ message CreateJoinCodeResponse {
   // Set when the code embeds an issued credential.
   string credential_id = 4;
   int64 expires_unix = 5;
+  int64 offline_retention = 6;
 }
 
 message ListPortForwardsRequest { RequestMeta meta = 1; }
@@ -388,6 +407,8 @@ service ControlPlaneV1Rpc {
   rpc IssueCredential(IssueCredentialRequest) returns (IssueCredentialResponse);
   rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
   rpc CreateJoinCode(CreateJoinCodeRequest) returns (CreateJoinCodeResponse);
+  rpc ForgetMachine(ForgetMachineRequest) returns (ForgetMachineResponse);
+  rpc ListOfflineMachines(ListOfflineMachinesRequest) returns (ListOfflineMachinesResponse);
   rpc ListPortForwards(ListPortForwardsRequest) returns (ListPortForwardsResponse);
   rpc WatchChanges(WatchChangesRequest) returns (WatchChangesResponse);
   rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);

@@ -31,7 +31,10 @@ use crate::{
     },
     common::{config_schema, runtime_registry},
     proto::{
-        api::control::v1::{ControlPlaneV1Rpc as _, ListPathsRequest, ListRoutesRequest, Page},
+        api::control::v1::{
+            ControlPlaneV1Rpc as _, ListOfflineMachinesRequest, ListPathsRequest,
+            ListRoutesRequest, OfflineMachine, Page,
+        },
         rpc_types::controller::BaseController,
     },
 };
@@ -383,7 +386,7 @@ impl Server {
     }
 
     async fn snapshot(&self, client: &Client) -> Result<Value> {
-        let (view, routes, paths) = tokio::join!(
+        let (view, routes, paths, offline_machines) = tokio::join!(
             status::fetch(client),
             client.rpc.list_routes(
                 client.controller(),
@@ -401,7 +404,8 @@ impl Server {
                 ListPathsRequest {
                     meta: client.meta(),
                 },
-            )
+            ),
+            self.offline_machines(client),
         );
         let view = view?;
         let routes = routes?;
@@ -420,6 +424,7 @@ impl Server {
             "sampled_at_unix_ms": chrono::Utc::now().timestamp_millis(),
             "node": serde_json::to_value(&view.node)?,
             "peers": serde_json::to_value(&peers.peers)?,
+            "offline_machines": serde_json::to_value(offline_machines?)?,
             "active_policy": peers.active_policy,
             "relay": serde_json::to_value(&view.relay)?,
             "discovery": serde_json::to_value(&view.discovery)?,
@@ -427,6 +432,34 @@ impl Server {
             "routes": serde_json::to_value(&routes.routes)?,
             "paths": serde_json::to_value(&paths.paths)?,
         }))
+    }
+
+    async fn offline_machines(&self, client: &Client) -> Result<Vec<OfflineMachine>> {
+        let mut machines = Vec::new();
+        let mut token = String::new();
+        loop {
+            let response = client
+                .rpc
+                .list_offline_machines(
+                    client.controller(),
+                    ListOfflineMachinesRequest {
+                        meta: client.meta(),
+                        page: Some(Page {
+                            limit: 128,
+                            page_token: token,
+                        }),
+                    },
+                )
+                .await?;
+            if let Some(error) = response.error {
+                return Err(error.into());
+            }
+            machines.extend(response.machines);
+            if response.next_page_token.is_empty() {
+                return Ok(machines);
+            }
+            token = response.next_page_token;
+        }
     }
 
     async fn config(&self, client: &Client) -> Result<Value> {

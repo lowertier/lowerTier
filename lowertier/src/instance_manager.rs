@@ -50,6 +50,9 @@ pub struct NetworkInstanceManager {
     #[cfg(feature = "gui")]
     gui_tasks: Arc<DashMap<uuid::Uuid, AbortOnDropHandle<()>>>,
     pub(crate) control_stats: crate::rpc_service::control::StatsCache,
+    pub(crate) machine_history: std::sync::Mutex<
+        BTreeMap<uuid::Uuid, crate::rpc_service::control::machines::MachineHistory>,
+    >,
     instance_map: Arc<DashMap<uuid::Uuid, NetworkInstance>>,
     instance_stop_tasks: Arc<DashMap<uuid::Uuid, AbortOnDropHandle<()>>>,
     stop_check_notifier: Arc<tokio::sync::Notify>,
@@ -83,6 +86,7 @@ impl NetworkInstanceManager {
             #[cfg(feature = "gui")]
             gui_tasks: Arc::new(DashMap::new()),
             control_stats: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            machine_history: Default::default(),
             instance_map: Arc::new(DashMap::new()),
             instance_stop_tasks: Arc::new(DashMap::new()),
             stop_check_notifier: Arc::new(tokio::sync::Notify::new()),
@@ -319,6 +323,10 @@ impl NetworkInstanceManager {
         #[cfg(feature = "gui")]
         self.gui_tasks.retain(|id, _| keep(id));
         self.control_stats.lock().unwrap().retain(|id, _| keep(id));
+        self.machine_history
+            .lock()
+            .unwrap()
+            .retain(|id, _| keep(id));
         self.control_configs
             .lock()
             .unwrap()

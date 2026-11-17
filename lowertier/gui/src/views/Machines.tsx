@@ -2,16 +2,19 @@ import { Index, Show, createMemo, createSignal } from "solid-js";
 import { Copy, Menu, Segmented, Spark, copyText } from "../components/controls";
 import { LinkGlyph, MoreGlyph } from "../components/icons";
 import { configured, say } from "../config";
-import { latency, loss, rate, NONE } from "../format";
+import { ago, latency, loss, rate, NONE } from "../format";
 import { noteFor } from "../notes";
 import { olderVersion } from "../peerIssues";
-import { history, peerName, peers, selectRemote, snapshot, tick, type PeerRow } from "../store";
+import { history, machines, now, peerName, peers, restart, selectRemote, snapshot, tick, type PeerRow } from "../store";
+import { rpc } from "../api";
+import { retentionLabel } from "../retention";
+import MachineRetention from "./MachineRetention";
 
 export const SELF = -1;
 const LOSSY = 10_000;
-const FILTERS = ["all", "direct", "relayed", "attention"] as const;
+const FILTERS = ["all", "direct", "relayed", "offline", "attention"] as const;
 type Filter = (typeof FILTERS)[number];
-const FILTER_LABEL: Record<Filter, string> = { all: "All", direct: "Direct", relayed: "Relayed", attention: "Attention" };
+const FILTER_LABEL: Record<Filter, string> = { all: "All", direct: "Direct", relayed: "Relayed", offline: "Offline", attention: "Attention" };
 
 type Sort = "name" | "rtt" | "traffic";
 
@@ -32,29 +35,31 @@ export default function Machines(props: {
   const [query, setQuery] = createSignal("");
   const [filter, setFilter] = createSignal<Filter>("all");
   const [sort, setSort] = createSignal<Sort>("name");
+  const [retention, setRetention] = createSignal<PeerRow>();
   const node = () => snapshot()?.node?.node ?? {};
   const localVersion = () => node().version ?? "";
   const attention = (row: PeerRow) => !row.direct || olderVersion(row.version, localVersion()) || (row.loss ?? 0) >= LOSSY;
 
   const rows = createMemo(() => {
     const text = query().trim().toLowerCase();
-    const found = peers().filter((row) => {
+    const found = machines().filter((row) => {
       if (filter() === "direct" && !row.direct) return false;
-      if (filter() === "relayed" && row.direct) return false;
+      if (filter() === "relayed" && (!row.online || row.direct)) return false;
+      if (filter() === "offline" && row.online) return false;
       if (filter() === "attention" && !attention(row)) return false;
       const note = noteFor(row.key)?.text ?? "";
       return !text || `${row.name} ${row.hostname} ${row.address} ${row.transport} ${row.version} ${note}`.toLowerCase().includes(text);
     });
     if (sort() === "rtt") return [...found].sort((a, b) => (a.rtt ?? Infinity) - (b.rtt ?? Infinity));
     if (sort() === "traffic") return [...found].sort((a, b) => b.rx + b.tx - (a.rx + a.tx));
-    return found;
+    return [...found].sort((a, b) => a.name.localeCompare(b.name));
   });
   const showSelf = () => {
     const text = query().trim().toLowerCase();
     return filter() === "all" && (!text || `${node().hostname ?? ""} ${node().ipv4_addr ?? ""}`.toLowerCase().includes(text));
   };
   const direct = () => peers().filter((row) => row.direct).length;
-  const needing = () => peers().filter(attention).length;
+  const needing = () => machines().filter(attention).length;
   const totalIn = () => peers().reduce((sum, row) => sum + row.rx, 0);
   const totalOut = () => peers().reduce((sum, row) => sum + row.tx, 0);
   const mid = () => median(peers().flatMap((row) => (row.rtt != null ? [row.rtt] : [])));
@@ -77,13 +82,23 @@ export default function Machines(props: {
   };
   const copy = (text: string, what: string) => copyText(text).then((done) => say(done ? `Copied ${what}.` : `Could not copy ${what}.`, !done));
   const selfKey = () => (configured("identity.public_key") as string | undefined) ?? "";
+  const forget = async (row: PeerRow) => {
+    try {
+      await rpc("ForgetMachine", { id: row.machineId });
+      if (props.selected === row.id) props.onSelect(undefined);
+      say(`Removed the offline record for ${row.name}.`);
+      restart();
+    } catch (error) {
+      say(error instanceof Error ? error.message : String(error), true);
+    }
+  };
 
   return (
     <div class="machines">
       <dl class="summary" aria-label="Network summary">
         <div>
           <dt>Machines</dt>
-          <dd>{snapshot() ? peers().length + 1 : NONE}</dd>
+          <dd>{snapshot() ? machines().length + 1 : NONE}<span class="of"> · {machines().filter((row) => !row.online).length} offline</span></dd>
         </div>
         <div>
           <dt>Direct</dt>
@@ -133,6 +148,7 @@ export default function Machines(props: {
               {sortHeader("rtt", "Round trip", true)}
               {sortHeader("traffic", "Traffic", true)}
               <th scope="col">Version</th>
+              <th scope="col">Last online</th>
               <th scope="col">
                 <span class="sr-only">Actions</span>
               </th>
@@ -168,6 +184,7 @@ export default function Machines(props: {
                   </span>
                 </td>
                 <td class="mono-ish">{node().version || NONE}</td>
+                <td>Online</td>
                 <td class="actions">
                   <Menu
                     label="Actions for this machine"
@@ -188,10 +205,11 @@ export default function Machines(props: {
                 const note = () => noteFor(row().key);
                 const older = () => olderVersion(row().version, localVersion());
                 return (
-                  <tr classList={{ selected: props.selected === row().id }} tabindex="0" onClick={() => open(row().id)} onKeyDown={rowKeys(row().id)}>
+                  <tr classList={{ selected: props.selected === row().id, offline: !row().online }} tabindex="0" onClick={() => open(row().id)} onKeyDown={rowKeys(row().id)}>
                     <td>
                       <div class="who">
                         <b>{row().name}</b>
+                        <span class="sub">{retentionLabel(row().retention)}</span>
                         <Show when={row().name !== row().hostname}>
                           <span class="sub">{row().hostname}</span>
                         </Show>
@@ -212,7 +230,7 @@ export default function Machines(props: {
                     <td>
                       <span class="link-cell" classList={{ relayed: !row().direct }}>
                         <LinkGlyph kind={row().direct ? "direct" : row().via != null ? "relayed" : "down"} />
-                        <Show when={row().direct} fallback={<span>{row().via != null ? `via ${peerName(row().via!)}` : "no route"}</span>}>
+                        <Show when={row().direct} fallback={<span>{!row().online ? "Offline" : row().via != null ? `via ${peerName(row().via!)}` : "no route"}</span>}>
                           <span>
                             direct <span class="sub">{row().transport}</span>
                           </span>
@@ -232,18 +250,27 @@ export default function Machines(props: {
                     </td>
                     <td class="num">
                       <span class="traffic">
-                        {rate(row().rx)}
-                        <span class="sub">{rate(row().tx)}</span>
+                        {row().online ? rate(row().rx) : NONE}
+                        <span class="sub">{row().online ? rate(row().tx) : NONE}</span>
                       </span>
                     </td>
                     <td classList={{ warn: older() }} title={older() ? "Older than this machine" : undefined}>
                       {row().version || NONE}
                     </td>
+                    <td>
+                      <Show when={!row().online} fallback="Online">
+                        <time dateTime={new Date(row().lastSeen ?? 0).toISOString()} title={new Date(row().lastSeen ?? 0).toLocaleString()}>
+                          {ago(Math.max(0, now() - (row().lastSeen ?? now())))} ago
+                        </time>
+                      </Show>
+                    </td>
                     <td class="actions">
                       <Menu
                         label={`Actions for ${row().name}`}
                         items={[
-                          { label: "Manage node", onSelect: () => selectRemote(row().key, row().name), disabled: !row().key },
+                          { label: "Manage node", onSelect: () => selectRemote(row().key, row().name), disabled: !row().key || !row().online },
+                          { label: "Offline retention…", onSelect: () => setRetention(row()), disabled: !row().key },
+                          ...(!row().online && row().machineId ? [{ label: "Forget offline record", onSelect: () => forget(row()), danger: true }] : []),
                           { label: "Rename…", onSelect: () => props.onEdit(row().id, "name") },
                           { label: note()?.text ? "Edit note…" : "Add note…", onSelect: () => props.onEdit(row().id, "text") },
                           { label: "Copy address", onSelect: () => copy(bareAddress(row().address), "the address"), disabled: !row().address },
@@ -263,7 +290,7 @@ export default function Machines(props: {
         <Show when={snapshot() && !rows().length && !showSelf()}>
           <p class="empty">No machine matches.</p>
         </Show>
-        <Show when={snapshot() && !peers().length && filter() === "all" && !query()}>
+        <Show when={snapshot() && !machines().length && filter() === "all" && !query()}>
           <div class="empty first-run">
             <p>No other machines yet.</p>
             <button type="button" class="link" onClick={props.onAdd}>
@@ -276,8 +303,9 @@ export default function Machines(props: {
         </Show>
       </div>
       <p class="table-foot">
-        Traffic shows received over sent. Names and notes are stored on this machine only.
+        Traffic shows received over sent. Offline records show the last time this node observed a route.
       </p>
+      <Show when={retention()}>{(row) => <MachineRetention row={row()} onClose={() => setRetention(undefined)} />}</Show>
     </div>
   );
 }

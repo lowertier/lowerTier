@@ -74,6 +74,7 @@ message Route {
   repeated bytes multicast_groups = 22;
   peer_rpc.PeerIdentityType peer_identity_type = 23;
   peer_rpc.SecureAuthLevel secure_auth_level = 24;
+  optional int64 offline_retention = 25;
 }
 
 message PeerRoutePair {

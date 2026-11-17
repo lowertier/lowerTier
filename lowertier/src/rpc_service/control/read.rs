@@ -33,6 +33,8 @@ pub(super) const METHODS: &[&str] = &[
     "IssueCredential",
     "RevokeCredential",
     "CreateJoinCode",
+    "ForgetMachine",
+    "ListOfflineMachines",
     "ListPortForwards",
     "WatchChanges",
     "GetConfig",
@@ -1027,6 +1029,12 @@ impl ControlPlaneService {
         }
         let context = instance.context()?;
         let identity = context.get_network_identity();
+        let offline_retention = request
+            .offline_retention
+            .unwrap_or(crate::common::config::DEFAULT_OFFLINE_RETENTION);
+        crate::common::config::validate_offline_retention(offline_retention).map_err(|error| {
+            failure("INVALID_ARGUMENT", &error.to_string(), "offline_retention")
+        })?;
         let admission = context
             .get_flags()
             .camouflage_config()
@@ -1063,9 +1071,11 @@ impl ControlPlaneService {
             admission: (!admission.is_empty()).then_some(admission),
             peers: request.peers,
             trackers,
+            offline_retention,
         };
         let mut response = CreateJoinCodeResponse {
             network_name: identity.network_name,
+            offline_retention,
             ..Default::default()
         };
         if request.use_credential {

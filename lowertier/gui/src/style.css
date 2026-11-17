@@ -1303,6 +1303,39 @@ td.actions {
   gap: 1px;
 }
 
+.retention-options .choice > label {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  cursor: pointer;
+}
+
+.retention-options .choice {
+  min-block-size: 64px;
+}
+
+.retention-period {
+  margin-block-start: 12px;
+}
+
+.retention-period select {
+  min-block-size: 48px;
+  font-size: 1rem;
+}
+
+.retention-result {
+  display: grid;
+  gap: 4px;
+}
+
+.join-advanced {
+  margin-block-start: 16px;
+}
+
+.machine-table tr.offline .who > b {
+  color: var(--muted);
+}
+
 .credential-options {
   display: grid;
   gap: 12px;
@@ -2119,6 +2152,16 @@ details.settings-group:not([open]) > summary {
 @media (max-width: 860px) {
   :root {
     --gutter: 16px;
+  }
+
+  .top-row {
+    flex-wrap: wrap;
+    padding-block: 10px;
+  }
+
+  .target {
+    flex-wrap: wrap;
+    max-inline-size: 100%;
   }
 
   .settings-layout {

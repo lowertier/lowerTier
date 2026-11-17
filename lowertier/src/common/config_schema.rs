@@ -158,6 +158,14 @@ pub static OPTIONS: &[OptionSpec] = &[
         "Name shown to peers. Defaults to the system host name.",
     ),
     opt(
+        "node.offline_retention",
+        Int,
+        To("offline_retention"),
+        Live,
+        "604800",
+        "Seconds to retain this machine after it goes offline. 0 removes temporary machines; -1 keeps records until removed. Maximum 31536000.",
+    ),
+    opt(
         "node.instance_name",
         Str,
         To("instance_name"),
@@ -1135,7 +1143,12 @@ const TABLE_FIELDS: &[(&str, &[(&str, &str)])] = &[
     ),
     (
         "note",
-        &[("peer", "peer"), ("name", "name"), ("text", "text")],
+        &[
+            ("peer", "peer"),
+            ("name", "name"),
+            ("text", "text"),
+            ("offline_retention", "offline_retention"),
+        ],
     ),
 ];
 

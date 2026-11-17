@@ -424,6 +424,13 @@ pub trait ConfigLoader: Send + Sync {
     fn get_hostname(&self) -> String;
     fn set_hostname(&self, name: Option<String>);
 
+    fn get_offline_retention(&self) -> i64 {
+        DEFAULT_OFFLINE_RETENTION
+    }
+    fn get_peer_notes(&self) -> Vec<PeerNote> {
+        Vec::new()
+    }
+
     fn get_inst_name(&self) -> String;
     fn set_inst_name(&self, name: String);
 
@@ -722,7 +729,7 @@ impl LoggingConfigLoader for &LoggingConfig {
     }
 }
 
-/// A local name and free-form note for one peer, keyed by its public key.
+/// Local display settings for one peer, keyed by its public key.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PeerNote {
@@ -731,11 +738,27 @@ pub struct PeerNote {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_retention: Option<i64>,
+}
+
+pub const DEFAULT_OFFLINE_RETENTION: i64 = 7 * 86_400;
+pub const MAX_OFFLINE_RETENTION: i64 = 365 * 86_400;
+
+pub fn validate_offline_retention(seconds: i64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (-1..=MAX_OFFLINE_RETENTION).contains(&seconds),
+        "offline retention must be -1 (keep), 0 (temporary), or up to 31536000 seconds"
+    );
+    Ok(())
 }
 
 fn validate_notes(notes: &[PeerNote]) -> anyhow::Result<()> {
     anyhow::ensure!(notes.len() <= 1024, "note permits 1024 entries");
     for (index, note) in notes.iter().enumerate() {
+        if let Some(seconds) = note.offline_retention {
+            validate_offline_retention(seconds)?;
+        }
         anyhow::ensure!(!note.peer.trim().is_empty(), "note.peer is empty");
         anyhow::ensure!(
             !notes[..index].iter().any(|other| other.peer == note.peer),
@@ -1057,6 +1080,7 @@ struct Config {
     discovery: Option<TrackerDiscoveryConfig>,
     netns: Option<String>,
     hostname: Option<String>,
+    offline_retention: Option<i64>,
     instance_name: Option<String>,
     instance_id: Option<uuid::Uuid>,
     ipv4: Option<String>,
@@ -1393,6 +1417,11 @@ impl TomlConfigLoader {
         validate_flags_with_network_secret(&flags, has_network_secret)
             .map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
         validate_notes(config.note.as_deref().unwrap_or_default())?;
+        validate_offline_retention(
+            config
+                .offline_retention
+                .unwrap_or(DEFAULT_OFFLINE_RETENTION),
+        )?;
         crate::common::control_config::validate_camouflage_listeners(
             &flags,
             config.listeners.as_deref().unwrap_or_default(),
@@ -1576,6 +1605,18 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn set_hostname(&self, name: Option<String>) {
         self.config.lock().unwrap().hostname = name;
+    }
+
+    fn get_offline_retention(&self) -> i64 {
+        self.config
+            .lock()
+            .unwrap()
+            .offline_retention
+            .unwrap_or(DEFAULT_OFFLINE_RETENTION)
+    }
+
+    fn get_peer_notes(&self) -> Vec<PeerNote> {
+        self.config.lock().unwrap().note.clone().unwrap_or_default()
     }
 
     fn get_netns(&self) -> Option<String> {

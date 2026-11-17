@@ -3,10 +3,11 @@ import { busy, configured, linkCosts, pathsConfigured, savePaths, setLinkCost, t
 import { LayersEditor, PathStatusView } from "../components/paths";
 import { Segmented } from "../components/controls";
 import Chart from "../components/Chart";
-import { bytes, latency, loss, rate, NONE } from "../format";
+import { ago, bytes, latency, loss, rate, NONE } from "../format";
 import { noteFor } from "../notes";
 import { sanitizeHops } from "../routeLoops";
-import { history, peerName, peers, selectRemote, selfId, snapshot, tick, type PeerRow } from "../store";
+import { history, machines, now, peerName, selectRemote, selfId, snapshot, tick, type PeerRow } from "../store";
+import { retentionLabel } from "../retention";
 import { Copy, Spark } from "../components/controls";
 import { Arrow, CloseGlyph } from "../components/icons";
 import { SELF, bareAddress } from "./Machines";
@@ -174,7 +175,7 @@ function SelfDetail() {
 }
 
 export default function PeerDetail(props: { id: number; onClose: () => void; onEdit: (id: number, field: "name" | "text") => void }) {
-  const row = () => peers().find((peer) => peer.id === props.id);
+  const row = () => machines().find((peer) => peer.id === props.id);
   const series = () => {
     tick();
     return history.get(props.id);
@@ -222,7 +223,7 @@ export default function PeerDetail(props: { id: number; onClose: () => void; onE
                 <button type="button" class="link" onClick={() => props.onEdit(peer().id, "name")}>
                   Rename
                 </button>
-                <Show when={peer().key}>
+                <Show when={peer().key && peer().online}>
                   <button
                     type="button"
                     class="link"
@@ -236,6 +237,14 @@ export default function PeerDetail(props: { id: number; onClose: () => void; onE
                 </Show>
               </section>
 
+              <Show when={!peer().online}>
+                <section>
+                  <h3>Offline</h3>
+                  <p>Last online {ago(Math.max(0, now() - (peer().lastSeen ?? now())))} ago.</p>
+                  <p class="hint">{retentionLabel(peer().retention)}. This record does not provide a route.</p>
+                </section>
+              </Show>
+              <Show when={peer().online}>
               <dl class="figures">
                 <div>
                   <dt>Round trip</dt>
@@ -328,6 +337,7 @@ export default function PeerDetail(props: { id: number; onClose: () => void; onE
                   <dd>{peer().secure ? "end-to-end session ready" : "no end-to-end session"}</dd>
                 </dl>
               </section>
+              </Show>
             </>
           )}
         </Show>

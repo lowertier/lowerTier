@@ -154,6 +154,8 @@ message RoutePeerInfo {
   reserved 31;
   reserved "relay_prefer";
   uint64 incarnation_started_unix_ms = 32;
+  // Display policy only. This value grants no network authority.
+  optional int64 offline_retention = 33;
 }
 
 message PeerIdVersion {

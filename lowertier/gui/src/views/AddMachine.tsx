@@ -5,6 +5,8 @@ import { rpc, type Doc } from "../api";
 import { Copy, Dialog, Segmented } from "../components/controls";
 import { configured, readDefaultBootstrapPeers, writeDefaultBootstrapPeers } from "../config";
 import { snapshot } from "../store";
+import RetentionOptions from "../components/RetentionOptions";
+import { DEFAULT_RETENTION, retentionLabel, retentionSeconds, type MachineType } from "../retention";
 
 const REPO = "lowertier/lowerTier";
 const RAW = `https://raw.githubusercontent.com/${REPO}/main/script`;
@@ -122,6 +124,8 @@ export default function AddMachine(props: { onClose: () => void }) {
   const [result, setResult] = createSignal<Doc | null>(null);
   const [error, setError] = createSignal("");
   const [working, setWorking] = createSignal(false);
+  const [machineType, setMachineType] = createSignal<MachineType>("retained");
+  const [retentionPeriod, setRetentionPeriod] = createSignal(DEFAULT_RETENTION);
   const peersChosen = () => [...offered().map((item) => item.uri), ...extra()].filter((uri) => chosen().has(uri));
   const trackersChosen = () =>
     trackerText()
@@ -155,6 +159,13 @@ export default function AddMachine(props: { onClose: () => void }) {
     setCustom("");
   };
   const create = async () => {
+    if (working()) return;
+    if (!canCreate()) {
+      setError(mode() === "credential"
+        ? "Choose at least one bootstrap peer for a credential code."
+        : "Enable at least one tracker or choose a bootstrap peer.");
+      return;
+    }
     setWorking(true);
     setError("");
     try {
@@ -163,6 +174,7 @@ export default function AddMachine(props: { onClose: () => void }) {
         peers: peersChosen(),
         trackers: !credential && useTrackers() ? trackersChosen() : [],
         use_credential: credential,
+        offline_retention: retentionSeconds(machineType(), retentionPeriod()),
         ...(credential
           ? {
               ttl_seconds: LIFETIMES[lifetime()],
@@ -188,6 +200,8 @@ export default function AddMachine(props: { onClose: () => void }) {
         fallback={
           <form
             class="join-form"
+            method="post"
+            aria-label="Add a machine"
             onSubmit={(event) => {
               event.preventDefault();
               create();
@@ -198,6 +212,17 @@ export default function AddMachine(props: { onClose: () => void }) {
               carries the network&apos;s admission material, tracker discovery, and optional bootstrap peers.
             </p>
 
+            <RetentionOptions
+              type={machineType()}
+              period={retentionPeriod()}
+              onType={setMachineType}
+              onPeriod={setRetentionPeriod}
+            />
+            <p class="hint">Retention controls the machine list. Credential expiry controls network access.</p>
+
+            <details class="advanced-setting" open={credentialNode()}>
+              <summary>Admission and discovery options</summary>
+              <div class="join-form join-advanced">
             <fieldset>
               <legend>Admission</legend>
               <label class="choice">
@@ -227,11 +252,11 @@ export default function AddMachine(props: { onClose: () => void }) {
                     <Segmented label="Credential lifetime" values={Object.keys(LIFETIMES)} value={lifetime()} onChange={setLifetime} />
                   </label>
                   <label class="check">
-                    <input type="checkbox" checked={reusable()} onChange={(event) => setReusable(event.currentTarget.checked)} /> Reusable: more than one machine may join with it
+                    <input name="reusable" type="checkbox" checked={reusable()} onChange={(event) => setReusable(event.currentTarget.checked)} /> Reusable: more than one machine may join with it
                   </label>
                   <label class="field">
                     <span>Groups</span>
-                    <input type="text" placeholder="Optional, comma separated" value={groups()} onInput={(event) => setGroups(event.currentTarget.value)} />
+                    <input name="groups" type="text" spellcheck={false} autocapitalize="none" placeholder="Optional, comma separated" value={groups()} onInput={(event) => setGroups(event.currentTarget.value)} />
                   </label>
                 </div>
               </Show>
@@ -292,7 +317,7 @@ export default function AddMachine(props: { onClose: () => void }) {
                     value={custom()}
                     onInput={(event) => setCustom(event.currentTarget.value)}
                     onKeyDown={(event) => {
-                      if (event.key === "Enter") {
+                      if (event.key === "Enter" && !event.isComposing) {
                         event.preventDefault();
                         addCustom();
                       }
@@ -315,6 +340,8 @@ export default function AddMachine(props: { onClose: () => void }) {
                 <Show when={defaultSaved()}><p class="hint">{defaultSaved()}</p></Show>
               </details>
             </fieldset>
+              </div>
+            </details>
 
             <Show when={error()}>
               <p class="hint bad" role="alert">
@@ -322,7 +349,7 @@ export default function AddMachine(props: { onClose: () => void }) {
               </p>
             </Show>
             <div class="dialog-actions">
-              <button type="submit" class="primary" disabled={working() || !canCreate()}>
+              <button type="submit" class="primary" disabled={working()}>
                 {working() ? "Creating…" : "Create join code"}
               </button>
               <Show when={!canCreate()}>
@@ -354,6 +381,10 @@ export default function AddMachine(props: { onClose: () => void }) {
               <code class="join-code">{made().code}</code>
             </div>
             <p class="hint warn-text">Anyone with this code can join the network. Share it the way you would share a password.</p>
+            <p class="retention-result" role="status">
+              {retentionLabel(Number(made().offline_retention ?? retentionSeconds(machineType(), retentionPeriod())))}
+              <span class="sub">The new machine advertises this policy to other nodes.</span>
+            </p>
 
             <div class="system-tabs">
               <Segmented label="Operating system" values={[...SYSTEMS]} value={system()} onChange={(value) => setSystem(value as System)} />

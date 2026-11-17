@@ -2,13 +2,13 @@ import { Show, createSignal, onMount } from "solid-js";
 import { Dialog } from "../components/controls";
 import { apply, busy } from "../config";
 import { noteFor, saveNote } from "../notes";
-import { peers, snapshot } from "../store";
+import { machines, snapshot } from "../store";
 import { SELF } from "./Machines";
 
 /** Rename a machine and edit its note. Peers get a local alias; this machine changes its hostname. */
 export default function EditMachine(props: { id: number; focus: "name" | "text"; onClose: () => void }) {
   const self = props.id === SELF;
-  const row = peers().find((peer) => peer.id === props.id);
+  const row = machines().find((peer) => peer.id === props.id);
   const note = row ? noteFor(row.key) : undefined;
   const hostname = self ? (snapshot()?.node?.node?.hostname ?? "") : (row?.hostname ?? "");
   const [name, setName] = createSignal(self ? hostname : (note?.name ?? ""));

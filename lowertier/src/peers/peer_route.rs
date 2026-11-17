@@ -663,6 +663,7 @@ impl RoutePeerInfo {
             bridge_attestation_expiry_unix_ms: 0,
             relay_link_cost: Vec::new(),
             incarnation_started_unix_ms: 0,
+            offline_retention: None,
         }
     }
 
@@ -740,6 +741,7 @@ impl RoutePeerInfo {
             feature_flag: Some(feature_flag),
             peer_route_id,
             incarnation_started_unix_ms,
+            offline_retention: Some(global_ctx.config.get_offline_retention()),
             network_length: global_ctx
                 .get_ipv4()
                 .map(|x| x.network_length() as u32)
@@ -875,6 +877,7 @@ impl From<RoutePeerInfo> for crate::proto::api::instance::Route {
             // RoutePeerInfo is wire data. It does not prove the advertised role.
             // Keep the role for display, but fail closed for authority decisions.
             secure_auth_level: SecureAuthLevel::EncryptedUnauthenticated as i32,
+            offline_retention: val.offline_retention,
         }
     }
 }

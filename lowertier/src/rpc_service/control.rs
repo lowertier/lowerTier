@@ -20,6 +20,7 @@ pub(crate) type StatsCache = Arc<
 pub(crate) mod config;
 mod instance;
 pub(crate) mod logs;
+pub(crate) mod machines;
 pub(crate) mod maintenance;
 pub mod policy;
 mod read;
@@ -246,6 +247,8 @@ control_service! {
     issue_credential, IssueCredentialRequest, IssueCredentialResponse, issue_credential_inner;
     revoke_credential, RevokeCredentialRequest, RevokeCredentialResponse, revoke_credential_inner;
     create_join_code, CreateJoinCodeRequest, CreateJoinCodeResponse, create_join_code_inner;
+    forget_machine, ForgetMachineRequest, ForgetMachineResponse, forget_machine_inner;
+    list_offline_machines, ListOfflineMachinesRequest, ListOfflineMachinesResponse, list_offline_machines_inner;
     list_port_forwards, ListPortForwardsRequest, ListPortForwardsResponse, list_port_forwards_inner;
     watch_changes, WatchChangesRequest, WatchChangesResponse, watch_changes_inner;
     get_config, GetConfigRequest, GetConfigResponse, get_config_inner;

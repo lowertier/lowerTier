@@ -28,6 +28,8 @@ ssh -L 18080:127.0.0.1:18080 host 'sudo lowertier gui --listen 127.0.0.1:18080 -
 - **Machines.** This machine and every peer: address, connection, round trip, traffic, version.
   Filter for direct peers, relayed peers, or peers that need attention: no direct connection, an older version, or 1% loss or more.
   Each row can be renamed and annotated, and opens a detail sheet with live figures, the route, the path editor, and connections.
+  The **Offline** filter shows saved machines and their last online times.
+  Offline records do not provide routes or network access.
 - **Routes.** Paths, groups, relay policy, transit, probe budget, and exit service.
 - **Logs.** Recent log lines.
 - **Settings.** General, Keys, Access, Connectivity, and All options, which lists every option with search and a TOML view.
@@ -37,6 +39,14 @@ The header switch picks Auto, Light, or Night.
 
 Names and notes for peers stay on the machine that serves the page, as `[[note]]` tables. Other machines keep their own.
 Renaming this machine changes `node.hostname`, which peers see.
+
+The action menu also offers **Offline retention…** for each peer.
+This override applies on the node that serves the page.
+It preserves the peer's name and note.
+Overrides use the public key, so machines that share a reusable credential share the override.
+**Forget offline record** removes a saved record.
+The record appears again if the machine rejoins.
+Record removal does not revoke a credential or change network admission.
 
 ```toml
 [[note]]
@@ -70,6 +80,38 @@ You can also select optional bootstrap peers for the new machine to dial first.
 When `camouflage.admission_secret` is set, every code carries it.
 The new machine uses a code with `lowertier init FILE --join CODE` or `install.sh install --join CODE`.
 Join codes need a build newer than release 0.01.
+
+The onboarding form offers three offline retention policies:
+
+| Policy | Behavior |
+| --- | --- |
+| **Temporary** | Remove the record when the machine loses its route. Use this for VMs and containers. |
+| **Keep for a period** | Keep the last online time for 1 hour, 1 day, 7 days, or 30 days. The default is 7 days. |
+| **Keep until removed** | Keep the record until you remove it. |
+
+The join code writes the policy to `node.offline_retention` on the new machine.
+The value uses seconds.
+`0` selects temporary records.
+`-1` selects permanent records.
+Positive values cannot exceed 365 days.
+The machine advertises this policy to other nodes.
+Each observer can override the policy through its action menu.
+Retention controls display metadata.
+Credential lifetime and revocation still control network access.
+Shared-secret codes retain their existing unlimited reuse.
+
+Nodes sample authenticated routes once each second, even when no browser is open.
+The last online time means the last route observation by that node.
+Different observers can report different times.
+The observer saves history beside its configuration as `<name>.machines.json`.
+History survives daemon restarts.
+Steady observations are saved once each minute.
+Membership and retention changes are saved immediately.
+Instances without a configuration file keep history in memory.
+History holds at most 1024 machines.
+The oldest finite records make space when the history is full.
+Permanent records remain.
+If all records are permanent, the observer cannot retain additional records.
 
 ## Access
 
@@ -116,6 +158,11 @@ Configuration editor documents retain TOML syntax.
 | `GET /api/config` | Active and staged configuration and options waiting for a restart. |
 | `POST /api/config` | Apply `set` values keyed by option path and a `clear` list. `stage: true` stores restart-class options. |
 | `POST /api/rpc/<Method>` | Any Control API method by protobuf name, for example `ReadLogs`. |
+
+`GET /api/snapshot` returns saved records in `offline_machines`, separate from live `peers`.
+`ListOfflineMachines` reads history in pages of at most 128 records and 64 KiB.
+`ForgetMachine` removes one offline record by its `id`.
+Remote removal requires `config.write` access to `note`.
 
 Add `?node=<portal or name>` and `?instance=<name>` when using `lowertier gui` to address another daemon or instance on the same machine.
 Add `?remote=<alias, key, or default>` (and optionally `?via_instance=<local instance>`) to forward the request to another node over an end-to-end Noise control session. Pass the remote control phrase in the `x-lowertier-remote-secret` header when the remote node uses `control.secret`.

@@ -35,10 +35,17 @@ pub struct JoinCode {
     pub peers: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trackers: Vec<String>,
+    #[serde(default = "default_retention")]
+    pub offline_retention: i64,
+}
+
+fn default_retention() -> i64 {
+    super::config::DEFAULT_OFFLINE_RETENTION
 }
 
 impl JoinCode {
     fn check(&self) -> anyhow::Result<()> {
+        super::config::validate_offline_retention(self.offline_retention)?;
         ensure!(!self.network.is_empty(), "the join code names no network");
         ensure!(
             self.secret.is_some() != self.credential.is_some(),
@@ -120,6 +127,7 @@ mod tests {
             admission: None,
             peers: vec!["quic://203.0.113.7:11012".into()],
             trackers: Vec::new(),
+            offline_retention: 0,
         }
     }
 
@@ -136,6 +144,7 @@ mod tests {
             admission: None,
             peers: Vec::new(),
             trackers: DEFAULT_TRACKERS.iter().map(|s| (*s).to_owned()).collect(),
+            offline_retention: -1,
         };
         let tracker_code = tracker_only.encode().unwrap();
         assert_eq!(JoinCode::decode(&tracker_code).unwrap(), tracker_only);
@@ -158,5 +167,8 @@ mod tests {
         assert!(none.encode().is_err());
         assert!(JoinCode::decode("lt2.abc").is_err());
         assert!(JoinCode::decode("lt1.!!").is_err());
+        let mut invalid = sample();
+        invalid.offline_retention = -2;
+        assert!(invalid.encode().is_err());
     }
 }

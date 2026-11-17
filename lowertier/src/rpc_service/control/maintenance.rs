@@ -36,6 +36,7 @@ async fn maintain(manager: Weak<NetworkInstanceManager>) {
         };
         super::remote::register(&manager);
         super::remote::sweep(&manager).await;
+        super::machines::refresh(&manager).await;
         let ids = manager.list_network_instance_ids();
         observed.retain(|id, _| ids.contains(id));
         for id in ids {

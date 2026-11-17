@@ -12,6 +12,7 @@ Secrets are redacted in all output.
 | --- | --- | --- | --- | --- |
 | `node.enabled` | bool | `true` | live | Run this instance. A false value keeps its persistent configuration available for management. |
 | `node.hostname` | string |  | live | Name shown to peers. Defaults to the system host name. |
+| `node.offline_retention` | integer | `604800` | live | Seconds to retain this machine after it goes offline. 0 removes temporary machines; -1 keeps records until removed. Maximum 31536000. |
 | `node.instance_name` | string | `default` | instance restart | Local instance name. Distinguishes instances in one process. |
 | `node.instance_id` | string |  | instance restart | Stable instance UUID. Generated when absent. |
 | `node.netns` | string |  | instance restart | Linux network namespace to run in. |

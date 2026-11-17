@@ -90,7 +90,12 @@ impl ControlPlaneService {
                 "config" => vec![self.manager.config_revision(id)],
                 "l2" => l2.clone(),
                 "discovery" => vec![event, discovery],
-                "peers" | "routes" | "relay" => vec![event, topology],
+                "peers" => vec![
+                    event,
+                    topology,
+                    super::machines::generation(&self.manager, id),
+                ],
+                "routes" | "relay" => vec![event, topology],
                 "instances" => {
                     let mut rows = self
                         .manager

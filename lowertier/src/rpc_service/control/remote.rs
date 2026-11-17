@@ -654,9 +654,8 @@ fn authorize(
     }
     let capability = match method {
         "GetConfig" => "config.read",
-        "PatchConfig" | "ValidateConfig" | "SetAcl" | "PutPortForward" | "DeletePortForward" => {
-            "config.write"
-        }
+        "PatchConfig" | "ValidateConfig" | "SetAcl" | "PutPortForward" | "DeletePortForward"
+        | "ForgetMachine" => "config.write",
         "ReadLogs" | "GetLogConfig" => "logs.read",
         "SetLogConfig" | "ClearLogs" => "logs.write",
         "ListCredentials" => "credentials.read",
@@ -690,6 +689,7 @@ fn authorize(
             .collect(),
         "SetAcl" => vec!["acl"],
         "PutPortForward" | "DeletePortForward" => vec!["forward"],
+        "ForgetMachine" => vec!["note"],
         _ => Vec::new(),
     };
     let permitted = if capability == "config.write" {
@@ -1050,6 +1050,26 @@ stun_tcp = []
             );
         }
         assert!(authorize(&policy, &key, true, false, "CreateInstance", &json!({}), 0).is_err());
+        assert!(authorize(&policy, &key, true, false, "ForgetMachine", &json!({}), 0).is_ok());
+        let read_only = node(
+            43,
+            &format!(
+                "[[control.grant]]\nfrom = ['pubkey:{}']\npermissions = ['status.read']",
+                BASE64_STANDARD.encode(key)
+            ),
+        );
+        assert!(
+            authorize(
+                &read_only.get_control_config(),
+                &key,
+                true,
+                false,
+                "ForgetMachine",
+                &json!({}),
+                0
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

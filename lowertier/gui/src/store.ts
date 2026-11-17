@@ -1,10 +1,12 @@
 // Polls the selected daemon once a second and keeps short histories for charts.
-import { createSignal } from "solid-js";
+import { createMemo, createRoot, createSignal } from "solid-js";
 import { api, ApiError, setTarget, type Doc } from "./api";
 import { configured } from "./config";
 import { ipv4, numeric } from "./format";
 import { currentIncarnations } from "./incarnations";
-import { aliasFor } from "./notes";
+import { aliasFor, noteFor } from "./notes";
+import { offlineRows } from "./offlineMachines";
+import { DEFAULT_RETENTION } from "./retention";
 import { disambiguatePeerNames, sanitizeHops, selectViaPeerId } from "./routeLoops";
 
 export const HISTORY = 120;
@@ -18,6 +20,10 @@ export interface PeerRow {
   name: string;
   hostname: string;
   address: string;
+  online: boolean;
+  machineId?: string;
+  lastSeen?: number;
+  retention: number;
   direct: boolean;
   transport: string;
   /** First hop when traffic to the peer goes through another peer. */
@@ -61,6 +67,29 @@ const [remoteSecret, setRemoteSecretSignal] = createSignal("");
 const [now, setNow] = createSignal(Date.now());
 
 export { snapshot, peers, localPeers, error, sampledAt, tick, nodes, selection, remoteSecret, now };
+
+const offlineIds = new Map<string, number>();
+let nextOfflineId = -2;
+export const machines = createRoot(() => createMemo(() => {
+  const records = snapshot()?.offline_machines ?? [];
+  const retained = new Set<string>(records.map((record: Doc) => record.id));
+  for (const identity of offlineIds.keys()) {
+    if (!retained.has(identity)) offlineIds.delete(identity);
+  }
+  return [
+    ...peers().map((peer) => ({ ...peer, retention: noteFor(peer.key)?.offline_retention ?? peer.retention })),
+    ...offlineRows(
+      records,
+      peers(),
+      now(),
+      (identity) => {
+        if (!offlineIds.has(identity)) offlineIds.set(identity, nextOfflineId--);
+        return offlineIds.get(identity)!;
+      },
+      aliasFor,
+    ).map((peer) => ({ ...peer, address: ipv4(peer.raw.route?.ipv4_addr) })),
+  ];
+}));
 
 export const history = new Map<number, Series>();
 export const totals: Series = { rtt: [], rx: [], tx: [] };
@@ -140,6 +169,9 @@ function ingest(doc: Doc, keepHistory = true) {
       name: aliasFor(peer.peer_key ?? "") || hostname,
       hostname,
       address: ipv4(route.ipv4_addr),
+      online: true,
+      lastSeen: at,
+      retention: Number(route.offline_retention ?? DEFAULT_RETENTION),
       direct,
       transport: conns[0]?.tunnel?.tunnel_type ?? "",
       via,
@@ -178,6 +210,10 @@ function ingest(doc: Doc, keepHistory = true) {
     selfHostname,
   );
   for (const row of rows) row.name = names.get(row.id) ?? row.name;
+  const active = new Set(rows.map((row) => row.id));
+  for (const id of history.keys()) {
+    if (!active.has(id)) history.delete(id);
+  }
   rows.sort((a, b) => a.name.localeCompare(b.name));
   if (keepHistory && previous) {
     push(totals.rx, rows.reduce((sum, row) => sum + row.rx, 0));
@@ -224,6 +260,8 @@ export function clearSnapshot() {
   previous = null;
   setSnapshot(null);
   setPeers([]);
+  offlineIds.clear();
+  nextOfflineId = -2;
   setError(null);
 }
 

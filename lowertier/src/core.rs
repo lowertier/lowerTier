@@ -607,6 +607,12 @@ pub fn init(options: &InitOptions) -> anyhow::Result<Vec<PathBuf>> {
 
     let mut text = String::new();
     text.push_str("# LowTier node. `lowertier config explain` documents every option.\n\n");
+    if let Some(join) = join {
+        text.push_str(&format!(
+            "[node]\noffline_retention = {}\n\n",
+            join.offline_retention
+        ));
+    }
     match credential {
         // The signed bundle supplies the identity key.
         Some(credential) => text.push_str(&format!(
@@ -743,6 +749,7 @@ mod tests {
             admission: Some("join-transport-admission".into()),
             peers: vec!["quic://198.51.100.4:11012".into()],
             trackers: vec![],
+            offline_retention: 3600,
         };
         init(&InitOptions {
             output: joined.clone(),
@@ -760,6 +767,7 @@ mod tests {
         assert_eq!(identity.network_name, "join-net");
         assert_eq!(identity.network_secret.as_deref(), Some("am9pbi1zZWNyZXQ="));
         assert_eq!(config.get_peers().len(), 1, "duplicate peers merge");
+        assert_eq!(config.get_offline_retention(), 3600);
         assert_eq!(
             config.get_flags().camouflage_config().admission_secret,
             "join-transport-admission"
