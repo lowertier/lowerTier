@@ -42,5 +42,72 @@
     "Not every no-TUN NIC error branch was exercised at runtime.",
     "The QUIC shared-carrier slow-reader stall remains unresolved.",
     "No matched throughput, CPU, or RSS comparison was run."
-  ]
+  ],
+  "application_commit": "94cca88a",
+  "fleet_deployment": {
+    "verified_at": "2026-11-17T08:37:12.580911+00:00",
+    "application_commit": "94cca88a",
+    "verified_instances": 11,
+    "binary_replacements": 11,
+    "service_restarts": 11,
+    "running_transfer_integrity_checks": 11,
+    "configuration_preserved": true,
+    "identities_preserved": true,
+    "configured_routes_preserved": true,
+    "mtu_policy_preserved": true,
+    "gui_policy_preserved": true,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "full_size_icmp_sent": 55,
+    "full_size_icmp_received": 55,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "udp_payload_bytes": [
+      64,
+      1160,
+      1252
+    ],
+    "tcp_bytes_per_instance_per_direction": 8388608,
+    "keyless_webui_pages": 11,
+    "keyless_json_api_reads": 11,
+    "keyless_json_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "fleet_h2_mode": "auto",
+    "fleet_quic_mode": "auto",
+    "temporary_fleet_fixtures_stopped": true,
+    "completed_transfer_files_removed": true,
+    "superseded_processes_absent": true,
+    "legacy_binary_backups_created": false,
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
+    "pending_status_checked_at": "2026-11-17T08:22:42.567167+00:00",
+    "application_source_overrides": {
+      "local": "10.126.126.100",
+      "alibj": "10.126.126.100",
+      "btrouter": "10.126.126.100",
+      "la": "10.126.126.100"
+    },
+    "report": "docs/performance/transport-conditions-20261117.md",
+    "summary": "benchmark-results/transport-conditions-20261117/fleet.json",
+    "audit": "benchmark-results/.work/transport-conditions-20261117/audit.jsonl",
+    "recoveries": [
+      "The router transfer resumed after a 300-second timeout.",
+      "The resume verified the retained 8,355,561-byte compressed prefix before append.",
+      "The final candidate passed complete binary transfer integrity and configuration checks.",
+      "The corrected local runtime fixture isolated tracker peer lists to preserve carrier roles."
+    ],
+    "limitations": [
+      "Fleet delivery uses normal transport selection and does not force each protocol.",
+      "The jpaws-to-LA check verifies exact delivery and does not measure throughput.",
+      "The shared-carrier QUIC slow-reader stall remains unresolved.",
+      "Three offline historical hosts remain pending.",
+      "No matched throughput, CPU, RSS, or artificial-loss experiment was run."
+    ]
+  }
 }

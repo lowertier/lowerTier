@@ -1,0 +1,1066 @@
+{
+  "summary": {
+    "verified_at": "2026-11-17T08:37:12.580911+00:00",
+    "application_commit": "94cca88a",
+    "verified_instances": 11,
+    "binary_replacements": 11,
+    "service_restarts": 11,
+    "running_transfer_integrity_checks": 11,
+    "configuration_preserved": true,
+    "identities_preserved": true,
+    "configured_routes_preserved": true,
+    "mtu_policy_preserved": true,
+    "gui_policy_preserved": true,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "full_size_icmp_sent": 55,
+    "full_size_icmp_received": 55,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "udp_payload_bytes": [
+      64,
+      1160,
+      1252
+    ],
+    "tcp_bytes_per_instance_per_direction": 8388608,
+    "keyless_webui_pages": 11,
+    "keyless_json_api_reads": 11,
+    "keyless_json_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "fleet_h2_mode": "auto",
+    "fleet_quic_mode": "auto",
+    "temporary_fleet_fixtures_stopped": true,
+    "completed_transfer_files_removed": true,
+    "superseded_processes_absent": true,
+    "legacy_binary_backups_created": false,
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
+    "pending_status_checked_at": "2026-11-17T08:22:42.567167+00:00",
+    "application_source_overrides": {
+      "local": "10.126.126.100",
+      "alibj": "10.126.126.100",
+      "btrouter": "10.126.126.100",
+      "la": "10.126.126.100"
+    },
+    "report": "docs/performance/transport-conditions-20261117.md",
+    "summary": "benchmark-results/transport-conditions-20261117/fleet.json",
+    "audit": "benchmark-results/.work/transport-conditions-20261117/audit.jsonl",
+    "recoveries": [
+      "The router transfer resumed after a 300-second timeout.",
+      "The resume verified the retained 8,355,561-byte compressed prefix before append.",
+      "The final candidate passed complete binary transfer integrity and configuration checks.",
+      "The corrected local runtime fixture isolated tracker peer lists to preserve carrier roles."
+    ],
+    "limitations": [
+      "Fleet delivery uses normal transport selection and does not force each protocol.",
+      "The jpaws-to-LA check verifies exact delivery and does not measure throughput.",
+      "The shared-carrier QUIC slow-reader stall remains unresolved.",
+      "Three offline historical hosts remain pending.",
+      "No matched throughput, CPU, RSS, or artificial-loss experiment was run."
+    ]
+  },
+  "instances": [
+    {
+      "host": "local",
+      "node": "local-native",
+      "address": "10.126.126.2/24",
+      "application_commit": "94cca88a",
+      "pid": 24118,
+      "runtime_observed_at": "2026-11-17T08:28:45.000637+00:00",
+      "binary_target": "native",
+      "transfer_sha256": "b786e55f287f239a79c570f659466ebd1738056a981855efc8ba7ceb8f37d9a1",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 42,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.100",
+      "application": [
+        {
+          "address": "10.126.126.2",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.2",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 916,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "862jp",
+      "node": "862jp-secondary",
+      "address": "10.126.126.82/24",
+      "application_commit": "94cca88a",
+      "pid": 2831182,
+      "runtime_observed_at": "2026-11-17T08:28:44.014060+00:00",
+      "binary_target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "42dce5047ff8736436ba2f39d544cff4e6ccdf6a63bf7c662be547421d31bd76",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 35,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.2",
+      "application": [
+        {
+          "address": "10.126.126.82",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.82",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 127,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 1161,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "jpali",
+      "node": "jpali-secondary",
+      "address": "10.126.126.62/24",
+      "application_commit": "94cca88a",
+      "pid": 1947699,
+      "runtime_observed_at": "2026-11-17T08:28:43.479907+00:00",
+      "binary_target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "42dce5047ff8736436ba2f39d544cff4e6ccdf6a63bf7c662be547421d31bd76",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 39,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.2",
+      "application": [
+        {
+          "address": "10.126.126.62",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.62",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 127,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 1006,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "s6916",
+      "node": "s6916",
+      "address": "10.126.126.60/24",
+      "application_commit": "94cca88a",
+      "pid": 949793,
+      "runtime_observed_at": "2026-11-17T08:28:43.505921+00:00",
+      "binary_target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "42dce5047ff8736436ba2f39d544cff4e6ccdf6a63bf7c662be547421d31bd76",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 39,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.2",
+      "application": [
+        {
+          "address": "10.126.126.60",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.60",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 936,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "yutoms-mcp",
+      "node": "yutoms-mcp-userspace",
+      "address": "10.126.126.3/24",
+      "application_commit": "94cca88a",
+      "pid": 51174,
+      "runtime_observed_at": "2026-11-17T08:28:50.603523+00:00",
+      "binary_target": "native",
+      "transfer_sha256": "b786e55f287f239a79c570f659466ebd1738056a981855efc8ba7ceb8f37d9a1",
+      "mode": "userspace",
+      "configured_mtu": 1280,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 40,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.2",
+      "application": [
+        {
+          "address": "10.126.126.3",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.3",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 129,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 804,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "jpaws",
+      "node": "jpaws",
+      "address": "10.126.126.100/24",
+      "application_commit": "94cca88a",
+      "pid": 2478057,
+      "runtime_observed_at": "2026-11-17T08:28:49.149973+00:00",
+      "binary_target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "42dce5047ff8736436ba2f39d544cff4e6ccdf6a63bf7c662be547421d31bd76",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 37,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.2",
+      "application": [
+        {
+          "address": "10.126.126.100",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.100",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 945,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "861jp",
+      "node": "861jp",
+      "address": "10.126.126.81/24",
+      "application_commit": "94cca88a",
+      "pid": 1920736,
+      "runtime_observed_at": "2026-11-17T08:28:49.820737+00:00",
+      "binary_target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "42dce5047ff8736436ba2f39d544cff4e6ccdf6a63bf7c662be547421d31bd76",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 34,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.2",
+      "application": [
+        {
+          "address": "10.126.126.81",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.81",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 938,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "alibj",
+      "node": "alibj",
+      "address": "10.126.126.110/24",
+      "application_commit": "94cca88a",
+      "pid": 273590,
+      "runtime_observed_at": "2026-11-17T08:28:51.636218+00:00",
+      "binary_target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "42dce5047ff8736436ba2f39d544cff4e6ccdf6a63bf7c662be547421d31bd76",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 39,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.100",
+      "application": [
+        {
+          "address": "10.126.126.110",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.110",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 824,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "hattori-opwrt",
+      "node": "hattori-wrt",
+      "address": "10.126.126.1/24",
+      "application_commit": "94cca88a",
+      "pid": 16249,
+      "runtime_observed_at": "2026-11-17T08:28:52.939332+00:00",
+      "binary_target": "aarch64-unknown-linux-musl",
+      "transfer_sha256": "bf0e7b7a1a26182613e34f402035b7d51a0449d81d56f71beb5cc762f13e5b9a",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 42,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.2",
+      "application": [
+        {
+          "address": "10.126.126.1",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.1",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 1473,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "btrouter",
+      "node": "btrouter",
+      "address": "10.126.126.40/24",
+      "application_commit": "94cca88a",
+      "pid": 3952,
+      "runtime_observed_at": "2026-11-17T08:28:59.126846+00:00",
+      "binary_target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "42dce5047ff8736436ba2f39d544cff4e6ccdf6a63bf7c662be547421d31bd76",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 40,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.100",
+      "application": [
+        {
+          "address": "10.126.126.40",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.40",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 1607,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    },
+    {
+      "host": "la",
+      "node": "la",
+      "address": "10.126.126.87/24",
+      "application_commit": "94cca88a",
+      "pid": 383186,
+      "runtime_observed_at": "2026-11-17T08:28:56.798290+00:00",
+      "binary_target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "42dce5047ff8736436ba2f39d544cff4e6ccdf6a63bf7c662be547421d31bd76",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "authenticated_connections": 41,
+      "h2_tcp_proxy": "auto",
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default",
+      "application_source": "10.126.126.100",
+      "application": [
+        {
+          "address": "10.126.126.87",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.87",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "full_size_icmp_received": 5,
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 112,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 841,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ],
+      "fixture_stopped": true,
+      "completed_transfer_files_absent": true
+    }
+  ],
+  "pending": [
+    {
+      "HostName": "tw2-ingress",
+      "Online": false,
+      "LastSeen": "2026-11-15T14:56:24.1Z"
+    },
+    {
+      "HostName": "btower",
+      "Online": false,
+      "LastSeen": "2026-10-17T08:28:58.1Z"
+    },
+    {
+      "HostName": "UTMOWRT",
+      "Online": false,
+      "LastSeen": "2026-10-27T04:12:15.1Z"
+    }
+  ]
+}

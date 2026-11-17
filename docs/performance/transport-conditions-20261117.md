@@ -94,13 +94,14 @@ The test matrix checks the feature boundaries without blanket warning suppressio
 
 The feature checks cover minimal, default, full with FFI, TUN-only, SOCKS5-only, userspace FFI, packet-tunnel FFI, and additional smoltcp media.
 The standalone smoltcp media tests also passed without warnings.
+The eight feature checks ran on macOS arm64.
 The standalone smoltcp IP-only tests passed with 17 unused test-fixture warnings.
 Those fixture warnings remain outside the production feature checks.
 Each Linux cross build reports `ignoring deprecated linker optimization setting "1"`.
 The linker warning remains visible.
 Windows, iOS, and FreeBSD builds were not run.
 
-Five external runtime cases use production executables without TUN.
+Five external runtime cases use non-test executables without TUN.
 Each case checks authenticated peers and an exact 4 MiB transfer in each direction.
 
 | Carrier | Admission | Server build | Result |
@@ -122,6 +123,38 @@ That replacement could give the SOCKS5 client the HTTP server role.
 Separate local tracker peer lists keep the configured carrier direction deterministic.
 The corrected fixture retained the same transfer assertions.
 All failed runs and their logs remain in the private audit directory.
+
+## Fleet deployment
+
+Application commit `94cca88a` is deployed to all eleven reachable test instances.
+Running-image transfer integrity passed on every instance.
+Configuration, identities, routes, MTUs, and GUI policy remain unchanged.
+H2 retains saved `auto`.
+QUIC retains its compiled `auto` default.
+
+| Check | Result |
+| --- | --- |
+| Full-size ICMP | 55 sent; 55 received. |
+| UDP at 64, 1,160, and 1,252 payload bytes | 165 sent; 165 exact replies received. |
+| TCP per instance | Exact 8 MiB upload and 8 MiB download. |
+| Authenticated transport observations | H2, QUIC, and WSS on every instance. |
+| Keyless GUI page, API, and RPC reads | Eleven passed for each check. |
+| Foreign-Origin rejection | Eleven passed. |
+| Running-image integrity | Eleven passed. |
+| Temporary fixture and transfer cleanup | Eleven passed. |
+
+The LA application check runs from jpaws.
+The checks use normal transport selection.
+They verify delivery and do not establish throughput changes or artificial-loss recovery.
+
+The router upload exceeded its first 300-second deadline.
+The resume verified the retained 8,355,561-byte compressed prefix before append.
+The complete candidate then passed binary transfer integrity and configuration checks.
+
+`tw2-ingress`, `btower`, and `UTMOWRT` remain offline and pending.
+Their migration is unverified.
+No legacy binary backups were created.
+Logs, configuration, keys, and raw measurements remain.
 
 ## Evidence
 
