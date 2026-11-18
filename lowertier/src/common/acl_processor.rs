@@ -255,12 +255,14 @@ pub type SharedState = (
 
 pub struct AclCounters {
     values: [AtomicU64; AclStatKey::COUNT],
+    decisions: [[AtomicU64; 3]; 4],
 }
 
 impl Default for AclCounters {
     fn default() -> Self {
         Self {
             values: std::array::from_fn(|_| AtomicU64::new(0)),
+            decisions: Default::default(),
         }
     }
 }
@@ -274,11 +276,36 @@ impl AclCounters {
         self.values[key as usize].load(Ordering::Relaxed)
     }
 
+    fn snapshot(&self) -> [u64; AclStatKey::COUNT] {
+        use AclStatKey::{PacketsAllowed, PacketsDropped, PacketsNoop, PacketsTotal};
+        let mut counts = self
+            .values
+            .each_ref()
+            .map(|value| value.load(Ordering::Relaxed));
+        for chain in [
+            ChainType::Inbound,
+            ChainType::Outbound,
+            ChainType::Forward,
+            ChainType::UnspecifiedChain,
+        ] {
+            let total = AclStatKey::from_chain_and_action(chain, AclStatType::Total);
+            for (action, stat, global) in [
+                (Action::Allow, AclStatType::Allowed, PacketsAllowed),
+                (Action::Drop, AclStatType::Dropped, PacketsDropped),
+                (Action::Noop, AclStatType::Noop, PacketsNoop),
+            ] {
+                let count = self.decisions[chain as usize][action as usize].load(Ordering::Relaxed);
+                let detail = AclStatKey::from_chain_and_action(chain, stat);
+                for key in [detail, total, global, PacketsTotal] {
+                    counts[key as usize] = counts[key as usize].wrapping_add(count);
+                }
+            }
+        }
+        counts
+    }
+
     pub fn len(&self) -> usize {
-        self.values
-            .iter()
-            .filter(|value| value.load(Ordering::Relaxed) != 0)
-            .count()
+        self.snapshot().iter().filter(|&&value| value != 0).count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -972,12 +999,17 @@ impl AclProcessor {
         self.stats.increment(key);
     }
 
+    pub(crate) fn record_decision(&self, chain: ChainType, action: Action) {
+        self.stats.decisions[chain as usize][action as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Get statistics
     pub fn get_stats(&self) -> HashMap<String, u64> {
+        let counts = self.stats.snapshot();
         let mut stats = AclStatKey::ALL
             .into_iter()
             .filter_map(|key| {
-                let value = self.stats.get(key);
+                let value = counts[key as usize];
                 (value != 0).then(|| (key.as_str(), value))
             })
             .collect::<HashMap<_, _>>();
@@ -1345,6 +1377,78 @@ mod tests {
     use super::*;
     use std::hash::{Hash, Hasher};
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn decision_totals_use_one_sample_per_chain_and_action() {
+        let processor = AclProcessor::new_disabled();
+        let chains = [
+            ChainType::Inbound,
+            ChainType::Outbound,
+            ChainType::Forward,
+            ChainType::UnspecifiedChain,
+        ];
+        let actions = [Action::Allow, Action::Drop, Action::Noop];
+        let start = std::sync::Barrier::new(chains.len() + 1);
+        std::thread::scope(|scope| {
+            for (index, chain) in chains.into_iter().enumerate() {
+                let processor = &processor;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    for (action_index, action) in actions.into_iter().enumerate() {
+                        for _ in 0..(index + 1) * (action_index + 1) {
+                            processor.record_decision(chain, action);
+                        }
+                    }
+                });
+            }
+            start.wait();
+            for _ in 0..64 {
+                let counts = processor.stats.snapshot();
+                let total = counts[AclStatKey::PacketsTotal as usize];
+                assert_eq!(
+                    total,
+                    [
+                        AclStatKey::PacketsAllowed,
+                        AclStatKey::PacketsDropped,
+                        AclStatKey::PacketsNoop
+                    ]
+                    .map(|key| counts[key as usize])
+                    .into_iter()
+                    .sum::<u64>()
+                );
+                assert_eq!(
+                    total,
+                    chains
+                        .map(|chain| counts
+                            [AclStatKey::from_chain_and_action(chain, AclStatType::Total) as usize])
+                        .into_iter()
+                        .sum::<u64>()
+                );
+            }
+        });
+        processor.increment_stat(AclStatKey::CacheHits);
+        processor.increment_stat(AclStatKey::PacketsTotal);
+        let stats = processor.get_stats();
+        for (index, prefix) in ["Inbound", "Outbound", "Forward", "Unknown"]
+            .into_iter()
+            .enumerate()
+        {
+            for (suffix, factor) in [("Allowed", 1), ("Dropped", 2), ("Noop", 3), ("Total", 6)] {
+                assert_eq!(
+                    stats[&format!("{prefix}Packets{suffix}")],
+                    (index as u64 + 1) * factor
+                );
+            }
+        }
+        assert_eq!(stats["PacketsAllowed"], 10);
+        assert_eq!(stats["PacketsDropped"], 20);
+        assert_eq!(stats["PacketsNoop"], 30);
+        assert_eq!(stats["PacketsTotal"], 61);
+        assert_eq!(stats["CacheHits"], 1);
+        assert_eq!(processor.stats.len(), 21);
+        assert!(!stats.contains_key("DefaultDrops"));
+    }
 
     #[tokio::test]
     async fn test_group_based_acl_rules() {

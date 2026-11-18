@@ -24,7 +24,7 @@ use crate::tunnel::{
     packet_def::{PacketType, ethernet_network_metadata},
 };
 use crate::{
-    common::acl_processor::{AclProcessor, AclResult, AclStatKey, AclStatType, PacketInfo},
+    common::acl_processor::{AclProcessor, AclResult, PacketInfo},
     proto::acl::{Acl, Action, ChainType},
     tunnel::packet_def::ZCPacket,
 };
@@ -357,40 +357,18 @@ impl AclFilter {
             );
         }
 
-        // Update global statistics in the ACL processor
+        processor.record_decision(chain_type, result.action);
         match result.action {
             Action::Allow => {
-                processor.increment_stat(AclStatKey::PacketsAllowed);
-                processor.increment_stat(AclStatKey::from_chain_and_action(
-                    chain_type,
-                    AclStatType::Allowed,
-                ));
                 tracing::trace!("ACL: Packet allowed");
             }
             Action::Drop => {
-                processor.increment_stat(AclStatKey::PacketsDropped);
-                processor.increment_stat(AclStatKey::from_chain_and_action(
-                    chain_type,
-                    AclStatType::Dropped,
-                ));
                 tracing::debug!("ACL: Packet dropped");
             }
             Action::Noop => {
-                processor.increment_stat(AclStatKey::PacketsNoop);
-                processor.increment_stat(AclStatKey::from_chain_and_action(
-                    chain_type,
-                    AclStatType::Noop,
-                ));
                 tracing::trace!("ACL: No operation");
             }
         }
-
-        // Track total packets processed per chain
-        processor.increment_stat(AclStatKey::from_chain_and_action(
-            chain_type,
-            AclStatType::Total,
-        ));
-        processor.increment_stat(AclStatKey::PacketsTotal);
     }
 
     fn classify_chain_type(
@@ -448,7 +426,7 @@ impl AclFilter {
 
     pub fn process_packet_batch_with_acl(
         &self,
-        batch: PacketBatch,
+        mut batch: PacketBatch,
         is_in: bool,
         my_ipv4: Option<Ipv4Addr>,
         is_local_ipv6: impl Fn(Ipv6Addr) -> bool + Copy,
@@ -463,24 +441,18 @@ impl AclFilter {
         }
 
         let processor = self.acl_processor.load();
-        let mut allowed = PacketBatch::with_capacity(batch.len());
-        for packet in batch {
-            if !packet_has_acl_ip_payload(&packet)
+        batch.retain_mut(|packet| {
+            !packet_has_acl_ip_payload(packet)
                 || self.process_packet_with_processor(
-                    &packet,
+                    packet,
                     is_in,
                     my_ipv4,
                     is_local_ipv6,
                     route,
                     &processor,
                 )
-            {
-                allowed
-                    .try_push(packet)
-                    .expect("an ACL output batch cannot exceed its input batch");
-            }
-        }
-        allowed
+        });
+        batch
     }
 
     fn process_packet_with_processor(
@@ -565,5 +537,74 @@ impl AclFilter {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        peers::route_trait::MockRoute,
+        proto::acl::{AclV1, Chain},
+    };
+
+    #[tokio::test]
+    async fn batch_keeps_control_and_permitted_packets_in_order() {
+        let filter = AclFilter::new();
+        filter.reload_rules(Some(&Acl {
+            acl_v1: Some(AclV1 {
+                chains: [
+                    (ChainType::Inbound, Action::Drop),
+                    (ChainType::Forward, Action::Allow),
+                ]
+                .map(|(chain, action)| Chain {
+                    enabled: true,
+                    chain_type: chain as i32,
+                    default_action: action as i32,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }),
+        }));
+        let mut batch = PacketBatch::new();
+        for (index, (kind, destination)) in [
+            (PacketType::Data, 1),
+            (PacketType::Ping, 1),
+            (PacketType::Data, 2),
+            (PacketType::Data, 1),
+            (PacketType::Data, 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut payload = [0_u8; 24];
+            payload[0] = 0x45;
+            payload[2..4].copy_from_slice(&24_u16.to_be_bytes());
+            payload[8] = 64;
+            payload[9] = 1;
+            payload[16..20].copy_from_slice(&[10, 0, 0, destination]);
+            payload[20] = index as u8;
+            let mut packet = ZCPacket::new_with_payload(&payload);
+            packet.fill_peer_manager_hdr(1, 2, kind as u8);
+            batch.try_push(packet).unwrap();
+        }
+        let kept = filter.process_packet_batch_with_acl(
+            batch,
+            true,
+            Some(Ipv4Addr::new(10, 0, 0, 1)),
+            |_| false,
+            &MockRoute {},
+        );
+        assert_eq!(
+            kept.iter()
+                .map(|packet| packet.payload()[20])
+                .collect::<Vec<_>>(),
+            [1, 2, 4]
+        );
+        let stats = filter.get_processor().get_stats();
+        assert_eq!(stats["PacketsTotal"], 4);
+        assert_eq!(stats["InboundPacketsDropped"], 2);
+        assert_eq!(stats["ForwardPacketsAllowed"], 2);
     }
 }

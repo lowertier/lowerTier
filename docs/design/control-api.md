@@ -133,6 +133,10 @@ Client deadlines must exceed the server wait. Coalesce resource generations; do 
 Expired cursors and process restarts return reset. Watch does not promise every intermediate event.
 ACL and credential methods retain existing authorization checks. Port forward changes use the same configuration transaction.
 
+`GetAclStats` derives packet totals from the counts for each ACL chain and decision.
+Each snapshot reads each decision counter once. Concurrent traffic can advance between reads.
+The counters describe rule decisions, not delivery after reply handling. Packet processing does not wait for a batch to publish a decision.
+
 ## CLI contract
 
 One binary, `lowertier`, runs nodes (`run`, `check`, `init`), manages them, and shows `top`.
